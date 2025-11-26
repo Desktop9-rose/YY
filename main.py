@@ -12,21 +12,17 @@ from kivy.core.window import Window
 from kivy.clock import Clock
 from kivy.utils import platform
 from kivy.graphics import Color, Rectangle
-from service import MedicalService  # 引入刚才创建的 service.py
+from service import MedicalService
 
-# 引入中文字体 (必须确保 msyh.ttf 存在)
 from kivy.core.text import LabelBase
 
 LabelBase.register(name='Roboto', fn_regular='msyh.ttf')
 
-# 字体常量
 FONT_L = '32sp'
 FONT_M = '28sp'
-FONT_S = '24sp'
 
 
 class NativeUtils:
-    """安卓原生功能封装"""
     _instance = None
 
     def __new__(cls):
@@ -38,14 +34,6 @@ class NativeUtils:
     def _init(self):
         self.tts = None
         if platform == 'android':
-            from jnius import autoclass
-            self.PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            self.CurrentActivity = self.PythonActivity.mActivity
-            self.Context = autoclass('android.content.Context')
-            self.Toast = autoclass('android.widget.Toast')
-            self.String = autoclass('java.lang.String')
-
-            # 初始化 TTS (使用 plyer，简单稳定)
             try:
                 from plyer import tts
                 self.tts = tts
@@ -54,10 +42,12 @@ class NativeUtils:
 
     def show_toast(self, text):
         if platform == 'android':
+            from jnius import autoclass
             try:
-                msg = self.String(text)
-                toast = self.Toast.makeText(self.CurrentActivity, msg, self.Toast.LENGTH_SHORT)
-                toast.show()
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Toast = autoclass('android.widget.Toast')
+                String = autoclass('java.lang.String')
+                Toast.makeText(PythonActivity.mActivity, String(text), Toast.LENGTH_SHORT).show()
             except:
                 pass
         else:
@@ -72,184 +62,123 @@ class NativeUtils:
                 pass
 
     def get_private_dir(self):
-        """获取安卓私有目录 (解决 Android 10+ 权限问题)"""
         if platform == 'android':
+            from jnius import autoclass
             try:
-                # 调用 Java: getExternalFilesDir(null)
-                return self.CurrentActivity.getExternalFilesDir(None).getAbsolutePath()
+                PA = autoclass('org.kivy.android.PythonActivity')
+                return PA.mActivity.getExternalFilesDir(None).getAbsolutePath()
             except:
                 return "."
         return "."
 
     def take_photo(self, filepath, callback):
-        """调用相机"""
-        self.photo_callback = callback
+        self.cb = callback
         if platform == 'android':
             from plyer import camera
             try:
-                # 关键：plyer.camera 在安卓上需要完整路径
-                camera.take_picture(filename=filepath, on_complete=self._on_plyer_complete)
+                camera.take_picture(filename=filepath, on_complete=self._done)
             except Exception as e:
                 self.show_toast(f"相机错误: {e}")
         else:
-            self.show_toast("电脑端模拟拍照")
-            # 模拟创建一张空图片，防止 service 报错
+            self.show_toast("电脑模拟拍照")
             with open(filepath, 'w') as f:
-                f.write("dummy")
-            self._on_plyer_complete(filepath)
+                f.write("test")
+            self._done(filepath)
 
-    def _on_plyer_complete(self, path):
-        if self.photo_callback:
-            self.photo_callback(path)
+    def _done(self, path):
+        if self.cb: self.cb(path)
 
 
 class ResultScreen(Screen):
-    """结果展示页"""
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.native = NativeUtils()
-
-        # 白底布局
         root = BoxLayout(orientation='vertical', padding='15dp', spacing='10dp')
         with root.canvas.before:
             Color(1, 1, 1, 1)
             Rectangle(size=(2000, 2000))
 
-        # 标题
-        root.add_widget(Label(text="会诊结论", font_size=FONT_L, color=(0, 0, 0, 1), bold=True, size_hint_y=0.1))
+        root.add_widget(Label(text="诊断结果", font_size=FONT_L, color=(0, 0, 0, 1), bold=True, size_hint_y=0.1))
 
-        # 滚动区域
         scroll = ScrollView(size_hint_y=0.8)
-        self.box_content = BoxLayout(orientation='vertical', spacing='20dp', size_hint_y=None)
-        self.box_content.bind(minimum_height=self.box_content.setter('height'))
+        self.box = BoxLayout(orientation='vertical', spacing='20dp', size_hint_y=None)
+        self.box.bind(minimum_height=self.box.setter('height'))
 
-        # 1. 核心结论 (红字)
-        self.lbl_core = Label(text="", font_size=FONT_L, color=(0.8, 0, 0, 1), markup=True, size_hint_y=None,
-                              halign='left', valign='top')
-        self.lbl_core.bind(texture_size=self.lbl_core.setter('size'))
-        self.box_content.add_widget(self.lbl_core)
+        self.lbl_content = Label(text="", font_size=FONT_M, color=(0, 0, 0, 1), markup=True, size_hint_y=None,
+                                 halign='left', valign='top')
+        self.lbl_content.bind(texture_size=self.lbl_content.setter('size'))
 
-        # 2. 异常分析 (黑字)
-        self.lbl_abnormal = Label(text="", font_size=FONT_M, color=(0, 0, 0, 1), markup=True, size_hint_y=None,
-                                  halign='left')
-        self.lbl_abnormal.bind(texture_size=self.lbl_abnormal.setter('size'))
-        self.box_content.add_widget(self.lbl_abnormal)
-
-        # 3. 生活建议 (黑字)
-        self.lbl_advice = Label(text="", font_size=FONT_M, color=(0, 0.5, 0, 1), markup=True, size_hint_y=None,
-                                halign='left')
-        self.lbl_advice.bind(texture_size=self.lbl_advice.setter('size'))
-        self.box_content.add_widget(self.lbl_advice)
-
-        scroll.add_widget(self.box_content)
+        self.box.add_widget(self.lbl_content)
+        scroll.add_widget(self.box)
         root.add_widget(scroll)
 
-        # 返回按钮
-        btn_back = Button(text="返回首页", size_hint_y=0.1, background_color=(0.2, 0.2, 0.2, 1), font_size=FONT_M)
-        btn_back.bind(on_release=self.go_back)
-        root.add_widget(btn_back)
-
+        btn = Button(text="返回", size_hint_y=0.1, background_color=(0.2, 0.2, 0.2, 1))
+        btn.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
+        root.add_widget(btn)
         self.add_widget(root)
 
-    def update_report(self, data):
-        """渲染报告"""
+    def update(self, data):
         res = data.get('result', {})
-
-        core = res.get('core_conclusion', '暂无结论')
-        abn = res.get('abnormal_analysis', '无')
-        adv = res.get('life_advice', '无')
-
-        self.lbl_core.text = f"[b]核心结论：[/b]\n{core}"
-        self.lbl_abnormal.text = f"[b]异常分析：[/b]\n{abn}"
-        self.lbl_advice.text = f"[b]生活建议：[/b]\n{adv}"
-
-        # 强制刷新布局
-        self.lbl_core.texture_update()
-
-        # 语音播报核心结论
-        self.native.speak(f"解读完成。{core}")
-
-    def go_back(self, instance):
-        self.manager.current = 'home'
+        text = f"[color=#aa0000][b]核心结论：[/b][/color]\n{res.get('core_conclusion', '')}\n\n"
+        text += f"[b]异常分析：[/b]\n{res.get('abnormal_analysis', '')}\n\n"
+        text += f"[color=#006600][b]生活建议：[/b][/color]\n{res.get('life_advice', '')}"
+        self.lbl_content.text = text
+        self.native.speak(res.get('core_conclusion', ''))
 
 
 class HomeScreen(Screen):
-    """首页"""
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.native = NativeUtils()
-        self.service = MedicalService()
+        self.svc = MedicalService()
 
-        # 布局
         root = BoxLayout(orientation='vertical', padding='20dp', spacing='30dp')
         with root.canvas.before:
             Color(1, 1, 1, 1)
             Rectangle(size=(2000, 2000))
 
-        # 标题
         root.add_widget(
-            Label(text="智能医疗报告解读", font_size=FONT_L, color=(0, 0, 0, 1), bold=True, size_hint_y=0.2))
+            Label(text="智能医疗报告解读", font_size='40sp', color=(0, 0, 0, 1), bold=True, size_hint_y=0.3))
+        self.status = Label(text="请拍照", font_size=FONT_M, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.1)
+        root.add_widget(self.status)
 
-        # 状态显示
-        self.lbl_status = Label(text="点击下方按钮拍照", font_size=FONT_M, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.1)
-        root.add_widget(self.lbl_status)
-
-        # 拍照按钮
-        btn_cam = Button(text="📷 拍照解读", font_size=FONT_L, background_color=(0.2, 0.2, 0.2, 1), size_hint_y=0.2)
-        btn_cam.bind(on_release=self.action_camera)
-        root.add_widget(btn_cam)
-
-        # 占位
-        root.add_widget(Label(size_hint_y=0.5))
+        btn = Button(text="📷 拍照解读", font_size=FONT_L, background_color=(0.2, 0.2, 0.2, 1), size_hint_y=0.2)
+        btn.bind(on_release=self.snap)
+        root.add_widget(btn)
+        root.add_widget(Label(size_hint_y=0.4))
         self.add_widget(root)
 
-        # 启动自检
-        Clock.schedule_once(self.check_config, 1)
+        Clock.schedule_once(lambda dt: self.check(), 1)
 
-    def check_config(self, dt):
-        if self.service.config_ready:
-            self.lbl_status.text = "✅ 云端已连接，请拍照"
-            self.native.speak("欢迎使用，请点击拍照按钮")
+    def check(self):
+        if self.svc.config_ready:
+            self.status.text = "✅ 云端就绪"
+            self.native.speak("系统就绪")
         else:
-            self.lbl_status.text = "⚠️ 密钥配置失败"
+            self.status.text = "⚠️ 配置缺失"
 
-    def action_camera(self, instance):
-        self.native.speak("请拍摄清晰的报告")
-        # 获取安全的私有路径
-        private_dir = self.native.get_private_dir()
-        file_path = os.path.join(private_dir, "temp_report.jpg")
+    def snap(self, instance):
+        p = os.path.join(self.native.get_private_dir(), 'doc.jpg')
+        self.native.take_photo(p, self.process)
 
-        self.native.take_photo(file_path, self.on_photo_taken)
+    def process(self, path):
+        if not os.path.exists(path): return
+        self.status.text = "🔄 分析中..."
+        self.native.speak("正在分析")
+        threading.Thread(target=self._run, args=(path,)).start()
 
-    def on_photo_taken(self, path):
-        if not os.path.exists(path):
-            self.lbl_status.text = "❌ 拍照取消或失败"
-            return
+    def _run(self, path):
+        res = self.svc.process(path)
+        Clock.schedule_once(lambda dt: self._done(res), 0)
 
-        self.lbl_status.text = "🔄 正在上传并分析..."
-        self.native.speak("正在分析，请稍候")
-
-        # 启动线程处理
-        threading.Thread(target=self.do_process, args=(path,)).start()
-
-    def do_process(self, path):
-        # 后台调用 Service
-        result = self.service.process(path)
-        # 回到主线程更新 UI
-        Clock.schedule_once(lambda dt: self.on_success(result), 0)
-
-    def on_success(self, result):
-        if result['code'] == 200:
-            self.lbl_status.text = "解读成功"
-            # 跳转
-            screen = self.manager.get_screen('result')
-            screen.update_report(result['data'])
+    def _done(self, res):
+        if res['code'] == 200:
+            self.status.text = "完成"
+            self.manager.get_screen('result').update(res['data'])
             self.manager.current = 'result'
         else:
-            self.lbl_status.text = f"出错：{result['message']}"
-            self.native.speak("解读失败，请重试")
+            self.status.text = f"错误: {res['message']}"
+            self.native.speak("失败")
 
 
 class MedicalApp(App):

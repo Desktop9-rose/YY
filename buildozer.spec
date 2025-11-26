@@ -16,11 +16,11 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,ttf,ini
 
 # (str) Application versioning (method 1)
-version = 0.2
+version = 0.3
 
 # (list) Application requirements
-# 核心修改：增加了 requests, alibabacloud 相关库, plyer
-requirements = python3,kivy==2.3.0,kivymd==1.1.1,pillow,requests,android,pyjnius,plyer,alibabacloud_ocr_api20210707,alibabacloud_tea_openapi,alibabacloud_tea_util
+# 关键修改：移除了所有 alibabacloud_* 库，只保留 requests
+requirements = python3,kivy==2.3.0,kivymd==1.1.1,pillow,requests,android,pyjnius,plyer
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
