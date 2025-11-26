@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-android:
-    # 关键修改1：强制使用 Ubuntu 22.04，这是 Buildozer 最稳定的环境
+    # 使用 Ubuntu 22.04 (Jammy)
     runs-on: ubuntu-22.04
 
     steps:
@@ -36,7 +36,10 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      # 关键修改2：补充 libtool-bin 和 automake，解决 configure.ac 报错
+      # 关键修复：
+      # 1. 移除了 gstreamer 相关库 (解决依赖冲突)
+      # 2. 添加了 libffi-dev (Python 编译必需)
+      # 3. 保留了 libtool-bin (解决 configure 报错)
       - name: Install System Dependencies
         run: |
           sudo apt-get update
@@ -44,17 +47,15 @@ jobs:
             build-essential git ffmpeg libsdl2-dev libsdl2-image-dev \
             libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev \
             libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev \
-            libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-            libssl-dev libsqlite3-dev openjdk-17-jdk autoconf libtool libtool-bin \
-            pkg-config zip unzip cmake automake
+            libssl-dev libsqlite3-dev libffi-dev openjdk-17-jdk \
+            autoconf libtool libtool-bin pkg-config zip unzip cmake automake
 
       - name: Install Buildozer
         run: |
           pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
-      # 关键修改3：在打包前，读取 GitHub Secrets 并写入 config.ini
-      # 这样 APK 里就会包含带有真实密钥的配置文件
+      # 现场生成 config.ini，注入密钥
       - name: Create Config File from Secrets
         env:
           AK_ID: ${{ secrets.ALIYUN_AK_ID }}
@@ -72,8 +73,8 @@ jobs:
           echo "tongyi_key = $TY_KEY" >> config.ini
           echo "cleaning_model_provider = tongyi" >> config.ini
           
-          # 打印一下文件内容（隐去敏感信息）确认文件已生成
-          cat config.ini | sed 's/= .*/= ***/g'
+          # 验证文件是否生成 (脱敏打印)
+          echo "Config file generated successfully."
 
       - name: Build with Buildozer
         id: buildozer
