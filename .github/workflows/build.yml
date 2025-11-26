@@ -3,87 +3,84 @@ name: Build Android APK
 on:
   push:
     branches: [ "main", "master" ]
-  workflow_dispatch:  # 允许手动点击按钮触发
+  workflow_dispatch:
 
 jobs:
   build-android:
-    runs-on: ubuntu-latest
+    # 关键修改1：强制使用 Ubuntu 22.04，这是 Buildozer 最稳定的环境
+    runs-on: ubuntu-22.04
 
     steps:
-      # 1. 拉取代码
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. 清理磁盘空间 (防止打包过程中空间不足报错)
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
         with:
           tool-cache: true
-          android: false  # 不要删除 Android SDK
+          android: false
           dotnet: true
           haskell: true
           large-packages: true
           docker-images: true
           swap-storage: true
 
-      # 3. 设置 Python 环境 (锁定 3.9 版本，最稳定)
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      # 4. 设置 Java 17 (Buildozer 新版要求)
       - name: Set up JDK 17
         uses: actions/setup-java@v3
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 5. 安装系统依赖 (这是最容易出错的地方，我们手动安装全)
+      # 关键修改2：补充 libtool-bin 和 automake，解决 configure.ac 报错
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            build-essential \
-            git \
-            ffmpeg \
-            libsdl2-dev \
-            libsdl2-image-dev \
-            libsdl2-mixer-dev \
-            libsdl2-ttf-dev \
-            libportmidi-dev \
-            libswscale-dev \
-            libavformat-dev \
-            libavcodec-dev \
-            zlib1g-dev \
-            libgstreamer1.0 \
-            gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good \
-            libssl-dev \
-            libsqlite3-dev \
-            openjdk-17-jdk \
-            autoconf \
-            libtool \
-            pkg-config \
-            zip \
-            unzip \
-            cmake
+            build-essential git ffmpeg libsdl2-dev libsdl2-image-dev \
+            libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev \
+            libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev \
+            libgstreamer1.0-dev gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            libssl-dev libsqlite3-dev openjdk-17-jdk autoconf libtool libtool-bin \
+            pkg-config zip unzip cmake automake
 
-      # 6. 安装 Python 依赖
-      - name: Install Buildozer and Dependencies
+      - name: Install Buildozer
         run: |
           pip install --upgrade pip
           pip install buildozer cython==0.29.36
 
-      # 7. 开始打包 (首次运行约需 15-20 分钟下载 SDK)
+      # 关键修改3：在打包前，读取 GitHub Secrets 并写入 config.ini
+      # 这样 APK 里就会包含带有真实密钥的配置文件
+      - name: Create Config File from Secrets
+        env:
+          AK_ID: ${{ secrets.ALIYUN_AK_ID }}
+          AK_SECRET: ${{ secrets.ALIYUN_AK_SECRET }}
+          DS_KEY: ${{ secrets.DEEPSEEK_KEY }}
+          TY_KEY: ${{ secrets.TONGYI_KEY }}
+        run: |
+          echo "[aliyun]" > config.ini
+          echo "access_key_id = $AK_ID" >> config.ini
+          echo "access_key_secret = $AK_SECRET" >> config.ini
+          echo "endpoint = ocr-api.cn-hangzhou.aliyuncs.com" >> config.ini
+          echo "" >> config.ini
+          echo "[llm]" >> config.ini
+          echo "deepseek_key = $DS_KEY" >> config.ini
+          echo "tongyi_key = $TY_KEY" >> config.ini
+          echo "cleaning_model_provider = tongyi" >> config.ini
+          
+          # 打印一下文件内容（隐去敏感信息）确认文件已生成
+          cat config.ini | sed 's/= .*/= ***/g'
+
       - name: Build with Buildozer
         id: buildozer
         run: |
-          # 自动接受 SDK 协议并开始打包
           yes | buildozer android debug
         continue-on-error: false
 
-      # 8. 上传生成的 APK
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
