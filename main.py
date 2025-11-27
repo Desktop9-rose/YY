@@ -9,6 +9,7 @@ from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.core.text import LabelBase
+from kivy.uix.screenmanager import ScreenManager  # 关键修复：补全此导入
 
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
@@ -251,7 +252,7 @@ class MedicalApp(MDApp):
         self.screen_manager.add_widget(SettingsScreen(name='settings'))
 
         # 启动逻辑
-        self.load_user_config()  # 修复：重命名方法，避免冲突
+        self.load_user_config()
         self.request_perms()
 
         return self.screen_manager
@@ -264,28 +265,16 @@ class MedicalApp(MDApp):
                                  Permission.INTERNET])
 
     def load_user_config(self):
-        """
-        加载配置逻辑：
-        1. 确定应用内部可写目录 (internal storage)。
-        2. 检查是否有打包自带的 app_config.ini (来自 GitHub Secrets)。
-        3. 如果内部存储没有配置文件，从打包资源中复制一份过去。
-        """
-        # 目标路径：App 私有数据目录（可读写）
         writable_dir = self.user_data_dir
         self.config_file = os.path.join(writable_dir, 'app_config.ini')
-
-        # 源路径：APK 包内资源（只读）
         bundled_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app_config.ini')
 
-        # 如果可写目录没有配置，且包内有配置，则复制（初始化）
         if not os.path.exists(self.config_file) and os.path.exists(bundled_config):
             try:
                 shutil.copy(bundled_config, self.config_file)
-                print(f"Config copied from {bundled_config} to {self.config_file}")
             except Exception as e:
                 print(f"Config copy failed: {e}")
 
-        # 读取配置
         self.app_config = configparser.ConfigParser()
         self.app_config.read(self.config_file)
         if not self.app_config.has_section('keys'):
@@ -297,7 +286,6 @@ class MedicalApp(MDApp):
             'ali_ak': self.app_config.get('keys', 'ali_ak', fallback=''),
             'ali_sk': self.app_config.get('keys', 'ali_sk', fallback='')
         }
-        print(f"Loaded keys: {self.keys.keys()}")  # Debug log
 
     def save_config(self):
         sc = self.screen_manager.get_screen('settings')
@@ -324,7 +312,6 @@ class MedicalApp(MDApp):
             sc.ids.key_ak.text = self.keys['ali_ak']
             sc.ids.key_sk.text = self.keys['ali_sk']
 
-    # --- Actions ---
     def action_camera(self):
         self.backend.open_camera(self.on_image_ready)
 
@@ -334,15 +321,11 @@ class MedicalApp(MDApp):
     def on_image_ready(self, path):
         if not path: return
         self.show_loading()
-        # 确保在后台线程运行分析
         threading.Thread(target=self.run_analysis, args=(path,)).start()
 
     def run_analysis(self, path):
-        # Call AI
         res = self.backend.analyze_report(path, self.keys)
-        # 确保 UI 更新在主线程
         self.update_result_ui(res)
-        # Save
         self.backend.save_record(res)
 
     @mainthread
@@ -372,11 +355,9 @@ class MedicalApp(MDApp):
         if hasattr(self, 'current_res_text'):
             self.backend.speak(self.current_res_text)
 
-    # --- History ---
     def load_history(self):
         data = self.backend.get_history()
         sc = self.screen_manager.get_screen('history')
-        # 清空列表
         sc.ids.history_list.data = []
         if not data:
             toast("暂无历史记录")
@@ -385,8 +366,8 @@ class MedicalApp(MDApp):
         sc.ids.history_list.data = [
             {
                 'viewclass': 'TwoLineAvatarIconListItem',
-                'text': item[2],  # Title
-                'secondary_text': item[1],  # Date
+                'text': item[2],
+                'secondary_text': item[1],
                 'icon': "file-document",
                 'on_release': lambda x=item[4]: self.show_history_detail(x)
             } for item in data
