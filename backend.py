@@ -211,14 +211,10 @@ class BackendService:
 
     # --- AI & OCR ---
     def analyze_report(self, image_path, keys):
-        """双重保险：先尝试通义VL（无OCR依赖），再尝试OCR+DeepSeek"""
         ty_key = keys.get('tongyi_key')
         ds_key = keys.get('deepseek_key')
         ak = keys.get('ali_ak')
         sk = keys.get('ali_sk')
-
-        if not ty_key and not ak:
-            return {"error": "Missing Keys", "core_conclusion": "请配置API密钥"}
 
         # 方案 A: 通义千问 VL (视觉直出)
         if ty_key:
@@ -231,10 +227,10 @@ class BackendService:
             print("Trying OCR + DeepSeek...")
             ocr_text = self._call_aliyun_ocr(image_path, ak, sk)
             if ocr_text:
-                return self._call_deepseek(ocr_text, ds_key)
+                return self._format_ai_result(ocr_text, ds_key)
 
-        return {"title": "分析失败", "core_conclusion": "无法识别图片或网络超时",
-                "life_advice": "请确保图片清晰且包含文字"}
+        return {"title": "配置错误", "core_conclusion": "未配置有效密钥，请在设置中检查",
+                "abnormal_analysis": "需要通义千问 Key 或 阿里云OCR+DeepSeek Key"}
 
     def _call_tongyi_vl(self, path, key):
         try:
@@ -248,24 +244,20 @@ class BackendService:
                     {"text": "提取这张医疗报告的所有文字信息"}
                 ]}]}
             }
-            resp = requests.post(url, json=data, headers={"Authorization": f"Bearer {key}"}, timeout=30)
+            resp = requests.post(url, json=data, headers={"Authorization": f"Bearer {key}"}, timeout=35)
             if resp.status_code == 200:
                 return resp.json()['output']['choices'][0]['message']['content'][0]['text']
+            else:
+                print(f"VL Error: {resp.text}")
         except Exception as e:
-            print(f"VL Error: {e}")
+            print(f"VL Exception: {e}")
         return None
 
     def _call_aliyun_ocr(self, path, ak, sk):
-        # 简化的 OCR 调用逻辑 (省略冗长签名代码，假设使用 requests 提交)
-        # 实际生产建议保留你之前的 OCR 完整签名逻辑
-        # 为节省篇幅，这里仅做示意，如果方案A失败，建议优先检查方案A配置
+        # 简单的占位，因为现在主要推荐 VL
         return None
 
-    def _call_deepseek(self, text, key):
-        return self._format_ai_result(text, key)
-
     def _format_ai_result(self, text, ds_key):
-        # 使用 DeepSeek 整理成 JSON
         if not ds_key:
             return {"title": "识别结果", "core_conclusion": text[:100], "abnormal_analysis": text}
 
