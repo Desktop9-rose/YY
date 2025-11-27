@@ -20,7 +20,7 @@ version = 0.3
 
 # (list) Application requirements
 # 关键修改：移除了所有 alibabacloud_* 库，只保留 requests
-requirements = python3,kivy==2.3.0,kivymd==1.1.1,pillow,requests,android,pyjnius,plyer
+requirements = python3,kivy==2.3.0,kivymd==1.1.1,requests,pillow,android,jnius,shutil,urllib3,sqlite3
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
@@ -29,7 +29,7 @@ orientation = portrait
 fullscreen = 0
 
 # (list) Permissions
-android.permissions = INTERNET,CAMERA,RECORD_AUDIO,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE
+android.permissions = INTERNET,CAMERA,WRITE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,RECORD_AUDIO
 
 # (int) Target Android API
 android.api = 33

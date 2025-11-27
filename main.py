@@ -1,490 +1,427 @@
 # -*- coding: utf-8 -*-
 import os
 import threading
-import json
-import time
-import shutil
 import sqlite3
+import json
+import configparser
 from datetime import datetime
 
-# Kivy 依赖
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.button import Button
-from kivy.uix.label import Label
-from kivy.uix.scrollview import ScrollView
 from kivy.uix.screenmanager import ScreenManager, Screen
-from kivy.uix.textinput import TextInput
+from kivy.lang import Builder
 from kivy.core.window import Window
-from kivy.clock import Clock
-from kivy.utils import platform
-from kivy.graphics import Color, Rectangle
+from kivy.clock import Clock, mainthread
+from kivy.properties import StringProperty, NumericProperty, ListProperty
+from kivy.uix.button import Button
+from kivy.animation import Animation
 from kivy.core.text import LabelBase
 
-# 业务逻辑
-from service import MedicalService
+# 引入后端逻辑
+from backend import NativeUtils, CloudService
 
-# --- 关键修复：绝对路径加载字体 ---
-app_folder = os.path.dirname(os.path.abspath(__file__))
-font_path = os.path.join(app_folder, 'msyh.ttf')
-LabelBase.register(name='Roboto', fn_regular=font_path)
+# 注册中文字体 (必须在 KV 加载前)
+# 假设 msyh.ttf 在 main.py 同级目录
+font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'msyh.ttf')
+LabelBase.register(name='Roboto', fn_regular=font_path)  # 替换默认字体防止方块
 
-FONT_L = '32sp'
-FONT_M = '28sp'
-FONT_S = '24sp'
+# Load UI
+Builder.load_string('''
+#:import hex kivy.utils.get_color_from_hex
 
-if platform == 'android':
-    from jnius import autoclass, cast, PythonJavaClass, java_method
-    from android import activity
-    from android.runnable import run_on_ui_thread
-else:
-    def run_on_ui_thread(f):
-        return f
+<CommonButton>:
+    background_normal: ''
+    background_color: (0,0,0,0)
+    canvas.before:
+        Color:
+            rgba: self.bg_color if self.state == 'normal' else [x*0.8 for x in self.bg_color]
+            a: self.opacity_val
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [20,]
+    BoxLayout:
+        pos: root.pos
+        size: root.size
+        orientation: 'horizontal'
+        padding: 20
+        spacing: 20
+        Image:
+            source: root.icon_source
+            size_hint: None, None
+            size: '40dp', '40dp'
+            pos_hint: {'center_y': 0.5}
+        Label:
+            text: root.text
+            font_size: '20sp'
+            bold: True
+            color: (1,1,1,1)
+            text_size: self.size
+            halign: 'left'
+            valign: 'middle'
+
+<HomeScreen>:
+    canvas.before:
+        Color:
+            rgba: hex('#F5F5F5')
+        Rectangle:
+            pos: self.pos
+            size: self.size
+    BoxLayout:
+        orientation: 'vertical'
+        padding: '30dp'
+        spacing: '20dp'
+
+        Label:
+            text: '医疗报告助手'
+            font_size: '32sp'
+            color: hex('#212121')
+            bold: True
+            size_hint_y: 0.3
+
+        CommonButton:
+            text: '拍照解读'
+            # icon_source: 'assets/camera.png' 
+            bg_color: hex('#2E7D32')
+            on_release: app.on_camera_click()
+
+        CommonButton:
+            text: '相册选择'
+            # icon_source: 'assets/gallery.png'
+            bg_color: hex('#1565C0')
+            on_release: app.pick_image()
+
+        CommonButton:
+            text: '历史记录'
+            # icon_source: 'assets/history.png'
+            bg_color: hex('#424242')
+            on_release: app.root.current = 'history'
+
+        BoxLayout:
+            size_hint_y: 0.15
+            Button:
+                text: '设置 API 密钥'
+                font_size: '18sp'
+                color: hex('#757575')
+                background_normal: ''
+                background_color: (0,0,0,0)
+                on_release: app.root.current = 'settings'
+
+<LoadingScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        canvas.before:
+            Color:
+                rgba: (0,0,0,0.8)
+            Rectangle:
+                pos: self.pos
+                size: self.size
+        Label:
+            text: "正在智能分析中..."
+            font_size: '24sp'
+        Label:
+            id: loading_detail
+            text: "上传图片 -> OCR识别 -> AI推理"
+            font_size: '16sp'
+            color: (0.8, 0.8, 0.8, 1)
+
+<ResultScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: '10dp'
+        canvas.before:
+            Color:
+                rgba: hex('#FFFFFF')
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        Label:
+            id: res_title
+            text: "报告标题"
+            size_hint_y: 0.1
+            color: hex('#000000')
+            font_size: '24sp'
+            bold: True
+
+        ScrollView:
+            BoxLayout:
+                orientation: 'vertical'
+                size_hint_y: None
+                height: self.minimum_height
+                padding: '10dp'
+                spacing: '20dp'
+
+                Label:
+                    text: "[b]核心结论[/b]"
+                    markup: True
+                    color: hex('#D32F2F')
+                    size_hint_y: None
+                    height: '30dp'
+                    text_size: self.width, None
+                    halign: 'left'
+                Label:
+                    id: res_core
+                    text: "..."
+                    color: hex('#212121')
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: 'left'
+
+                Label:
+                    text: "[b]异常指标分析[/b]"
+                    markup: True
+                    color: hex('#F57C00')
+                    size_hint_y: None
+                    height: '30dp'
+                    text_size: self.width, None
+                    halign: 'left'
+                Label:
+                    id: res_abnormal
+                    text: "..."
+                    color: hex('#212121')
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: 'left'
+
+                Label:
+                    text: "[b]生活建议[/b]"
+                    markup: True
+                    color: hex('#388E3C')
+                    size_hint_y: None
+                    height: '30dp'
+                    text_size: self.width, None
+                    halign: 'left'
+                Label:
+                    id: res_advice
+                    text: "..."
+                    color: hex('#212121')
+                    size_hint_y: None
+                    height: self.texture_size[1]
+                    text_size: self.width, None
+                    halign: 'left'
+
+        Button:
+            text: "返回首页"
+            size_hint_y: 0.1
+            background_color: hex('#757575')
+            on_release: app.root.current = 'home'
+
+<SettingsScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        padding: '20dp'
+        spacing: '10dp'
+        canvas.before:
+            Color:
+                rgba: hex('#FFFFFF')
+            Rectangle:
+                pos: self.pos
+                size: self.size
+
+        Label:
+            text: "配置密钥"
+            color: hex('#000000')
+            font_size: '24sp'
+            size_hint_y: 0.1
+
+        TextInput:
+            id: input_ali_ak
+            hint_text: '阿里云 AccessKey ID'
+            multiline: False
+            size_hint_y: None
+            height: '50dp'
+        TextInput:
+            id: input_ali_sk
+            hint_text: '阿里云 AccessKey Secret'
+            multiline: False
+            password: True
+            size_hint_y: None
+            height: '50dp'
+        TextInput:
+            id: input_deepseek
+            hint_text: 'DeepSeek API Key'
+            multiline: False
+            password: True
+            size_hint_y: None
+            height: '50dp'
+
+        Button:
+            text: "保存并返回"
+            size_hint_y: None
+            height: '60dp'
+            on_release: root.save()
+
+        Widget: 
+            size_hint_y: 0.5
+
+<HistoryScreen>:
+    BoxLayout:
+        orientation: 'vertical'
+        Label:
+            text: "暂未实现历史记录详情查看"
+            color: (0,0,0,1)
+        Button:
+            text: "返回"
+            size_hint_y: 0.1
+            on_release: app.root.current = 'home'
+''')
 
 
-    activity = None
+class CommonButton(Button):
+    bg_color = ListProperty([0, 0, 0, 1])
+    icon_source = StringProperty('')
+    opacity_val = NumericProperty(1)
 
-
-# --- 数据库模块 (保持不变) ---
-class DBManager:
-    def __init__(self, db_path):
-        db_dir = os.path.dirname(db_path)
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.cursor = self.conn.cursor()
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT, summary TEXT, details TEXT
-            )
-        ''')
-        self.conn.commit()
-
-    def add_record(self, summary, details):
-        try:
-            date_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-            self.cursor.execute('INSERT INTO history (date, summary, details) VALUES (?, ?, ?)',
-                                (date_str, summary, json.dumps(details, ensure_ascii=False)))
-            self.conn.commit()
-        except Exception as e:
-            print(f"[DB] Error: {e}")
-
-    def get_all(self):
-        try:
-            self.cursor.execute('SELECT * FROM history ORDER BY id DESC')
-            return self.cursor.fetchall()
-        except:
-            return []
-
-
-# --- TTS 模块 ---
-class AndroidTTS:
-    def __init__(self):
-        self.tts = None
-        if platform == 'android':
-            try:
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
-                app_context = PythonActivity.mActivity.getApplicationContext()
-                self.tts = TextToSpeech(app_context, None)
-            except Exception as e:
-                print(f"[TTS] Init Error: {e}")
-
-    def speak(self, text):
-        if self.tts:
-            try:
-                # 限制文本长度防止缓冲区溢出
-                if len(text) > 200:
-                    text = text[:200] + "..."
-                self.tts.speak(str(text), 0, None)
-            except Exception as e:
-                print(f"[TTS] Speak Error: {e}")
-
-
-# --- Native 工具类 ---
-class NativeUtils:
-    _instance = None
-    _callback = None
-    _camera_target_path = None
-
-    REQUEST_CAMERA = 0x101
-    REQUEST_GALLERY = 0x102
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(NativeUtils, cls).__new__(cls)
-            cls._instance._init()
-        return cls._instance
-
-    def _init(self):
-        self.tts_engine = AndroidTTS()
-        if platform == 'android':
-            try:
-                activity.bind(on_activity_result=self.on_activity_result)
-                StrictMode = autoclass('android.os.StrictMode')
-                Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
-                StrictMode.setVmPolicy(Builder().build())
-            except Exception as e:
-                print(f"[Native] Init Warn: {e}")
-
-    @run_on_ui_thread
-    def show_toast(self, text):
-        if platform == 'android':
-            try:
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Toast = autoclass('android.widget.Toast')
-                String = autoclass('java.lang.String')
-                Toast.makeText(PythonActivity.mActivity, String(str(text)), 0).show()
-            except:
-                pass
-
-    def speak(self, text):
-        Clock.schedule_once(lambda dt: self.tts_engine.speak(text), 0.2)
-
-    def request_permissions(self):
-        if platform == 'android':
-            from android.permissions import request_permissions, Permission
-            request_permissions([
-                Permission.CAMERA, Permission.READ_EXTERNAL_STORAGE,
-                Permission.WRITE_EXTERNAL_STORAGE, Permission.RECORD_AUDIO
-            ])
-
-    def get_app_dir(self):
-        if platform == 'android':
-            try:
-                PA = autoclass('org.kivy.android.PythonActivity')
-                return PA.mActivity.getFilesDir().getAbsolutePath()
-            except:
-                return "."
-        return "."
-
-    def get_cache_dir(self):
-        if platform == 'android':
-            try:
-                PA = autoclass('org.kivy.android.PythonActivity')
-                return PA.mActivity.getExternalCacheDir().getAbsolutePath()
-            except:
-                return "."
-        return "."
-
-    def open_camera(self, callback):
-        self._callback = callback
-        if platform == 'android':
-            try:
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                MediaStore = autoclass('android.provider.MediaStore')
-                Uri = autoclass('android.net.Uri')
-                File = autoclass('java.io.File')
-                # 关键修复：引入 Parcelable
-                Parcelable = autoclass('android.os.Parcelable')
-
-                filename = f"OCR_{int(time.time())}.jpg"
-                self._camera_target_path = os.path.join(self.get_cache_dir(), filename)
-                photo_file = File(self._camera_target_path)
-                photo_uri = Uri.fromFile(photo_file)
-
-                intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                # 关键修复：显式转换类型
-                intent.putExtra(MediaStore.EXTRA_OUTPUT, cast('android.os.Parcelable', photo_uri))
-
-                PythonActivity.mActivity.startActivityForResult(intent, self.REQUEST_CAMERA)
-            except Exception as e:
-                self.show_toast(f"相机启动失败: {e}")
-                print(f"[Camera] Error: {e}")
+    def on_state(self, instance, value):
+        if value == 'down':
+            anim = Animation(opacity_val=0.8, duration=0.1)
         else:
-            self.show_toast("电脑模拟拍照")
-            callback("mock.jpg")
-
-    def open_gallery(self, callback):
-        self._callback = callback
-        if platform == 'android':
-            try:
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-                intent = Intent(Intent.ACTION_PICK)
-                intent.setType("image/*")
-                PythonActivity.mActivity.startActivityForResult(intent, self.REQUEST_GALLERY)
-            except Exception as e:
-                self.show_toast(f"相册错误: {e}")
-
-    def on_activity_result(self, request_code, result_code, intent):
-        if result_code != -1: return True
-        if request_code == self.REQUEST_CAMERA:
-            if self._camera_target_path and os.path.exists(self._camera_target_path):
-                self._safe_callback(self._camera_target_path)
-        elif request_code == self.REQUEST_GALLERY:
-            if intent:
-                uri = intent.getData()
-                threading.Thread(target=self._process_gallery_uri, args=(uri,)).start()
-        return True
-
-    def _process_gallery_uri(self, uri):
-        safe_path = self._uri_to_path_fd(uri)
-        if safe_path:
-            self._safe_callback(safe_path)
-        else:
-            Clock.schedule_once(lambda dt: self.show_toast("图片读取失败"), 0)
-
-    def _safe_callback(self, path):
-        if self._callback:
-            Clock.schedule_once(lambda dt: self._callback(path), 0)
-
-    def _uri_to_path_fd(self, uri):
-        try:
-            PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            context = PythonActivity.mActivity
-            resolver = context.getContentResolver()
-            pfd = resolver.openFileDescriptor(uri, "r")
-            if not pfd: return None
-            fd = pfd.getFd()
-            dest_path = os.path.join(self.get_cache_dir(), f"gallery_{int(time.time())}.jpg")
-            with os.fdopen(fd, 'rb', closefd=False) as src, open(dest_path, 'wb') as dst:
-                shutil.copyfileobj(src, dst)
-            pfd.close()
-            return dest_path
-        except Exception as e:
-            print(f"FD Copy Error: {e}")
-            return None
-
-
-# --- 界面类 (保持原逻辑，只需确保字体加载) ---
-class ResultScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.native = NativeUtils()
-        self.db = None
-
-        root = BoxLayout(orientation='vertical', padding='15dp', spacing='10dp')
-        with root.canvas.before:
-            Color(1, 1, 1, 1)
-            Rectangle(size=(2000, 2000))
-
-        # 使用 FONT_L 常量
-        root.add_widget(Label(text="诊断结果", font_size=FONT_L, color=(0, 0, 0, 1), bold=True, size_hint_y=0.1))
-
-        scroll = ScrollView(size_hint_y=0.8)
-        self.box = BoxLayout(orientation='vertical', spacing='20dp', size_hint_y=None, padding=[0, 20, 0, 20])
-        self.box.bind(minimum_height=self.box.setter('height'))
-
-        self.lbl_content = Label(
-            text="加载中...", font_size=FONT_M, color=(0, 0, 0, 1), markup=True,
-            size_hint_y=None, halign='left', valign='top', text_size=(Window.width - 50, None)
-        )
-        self.lbl_content.bind(texture_size=self.lbl_content.setter('size'))
-        self.box.add_widget(self.lbl_content)
-        scroll.add_widget(self.box)
-        root.add_widget(scroll)
-
-        btn_layout = BoxLayout(size_hint_y=0.1, spacing='10dp')
-        btn_play = Button(text="🔊 播报", background_color=(0.2, 0.6, 1, 1))
-        btn_play.bind(on_release=self.replay_audio)
-        btn_back = Button(text="返回", background_color=(0.5, 0.5, 0.5, 1))
-        btn_back.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
-
-        btn_layout.add_widget(btn_play)
-        btn_layout.add_widget(btn_back)
-        root.add_widget(btn_layout)
-        self.current_text = ""
-
-    def update(self, data, save_db=True):
-        res = data.get('result', {})
-        core = res.get('core_conclusion', '无')
-        abn = res.get('abnormal_analysis', '无')
-        life = res.get('life_advice', '无')
-
-        if save_db and self.db:
-            self.db.add_record(core, res)
-
-        text = f"[color=#aa0000][b]核心结论：[/b][/color]\n{core}\n\n"
-        text += f"[b]异常分析：[/b]\n{abn}\n\n"
-        text += f"[color=#006600][b]生活建议：[/b][/color]\n{life}"
-
-        self.lbl_content.text = text
-        self.lbl_content.texture_update()
-
-        self.current_text = f"解读完成。{core}"
-        self.native.speak(self.current_text)
-
-    def replay_audio(self, instance):
-        if self.current_text:
-            self.native.speak(self.current_text)
-
-
-class HistoryScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.db = None
-        root = BoxLayout(orientation='vertical', padding='10dp')
-        with root.canvas.before:
-            Color(0.95, 0.95, 0.95, 1);
-            Rectangle(size=(2000, 2000))
-        root.add_widget(Label(text="历史记录", font_size=FONT_L, color=(0, 0, 0, 1), size_hint_y=0.1))
-        self.scroll = ScrollView(size_hint_y=0.8)
-        self.list_box = BoxLayout(orientation='vertical', spacing='10dp', size_hint_y=None)
-        self.list_box.bind(minimum_height=self.list_box.setter('height'))
-        self.scroll.add_widget(self.list_box)
-        root.add_widget(self.scroll)
-        btn_back = Button(text="返回", size_hint_y=0.1, background_color=(0.5, 0.5, 0.5, 1))
-        btn_back.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
-        root.add_widget(btn_back)
-        self.add_widget(root)
-
-    def on_enter(self):
-        self.refresh_list()
-
-    def refresh_list(self):
-        self.list_box.clear_widgets()
-        if not self.db: return
-        for rid, date, summary, details in self.db.get_all():
-            item = BoxLayout(orientation='vertical', size_hint_y=None, height='100dp', padding='5dp')
-            with item.canvas.before:
-                Color(1, 1, 1, 1);
-                Rectangle(pos=item.pos, size=item.size)
-            item.add_widget(Label(text=date, font_size=FONT_S, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.3))
-            item.add_widget(
-                Label(text=str(summary)[:20] + "...", font_size=FONT_M, color=(0, 0, 0, 1), size_hint_y=0.7))
-            btn = Button(background_color=(0, 0, 0, 0), size_hint=(1, 1), pos=item.pos)
-            btn.bind(on_release=lambda x, d=details: self.show_detail(d))
-            item.add_widget(btn)
-            self.list_box.add_widget(item)
-
-    def show_detail(self, details_json):
-        try:
-            data = json.loads(details_json)
-            self.manager.get_screen('result').update({'result': data}, save_db=False)
-            self.manager.current = 'result'
-        except:
-            pass
-
-
-class SettingScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.svc = None
-        root = BoxLayout(orientation='vertical', padding='20dp', spacing='20dp')
-        with root.canvas.before:
-            Color(1, 1, 1, 1);
-            Rectangle(size=(2000, 2000))
-        root.add_widget(Label(text="设置", font_size=FONT_L, color=(0, 0, 0, 1), size_hint_y=0.1))
-        self.ti_ak = TextInput(hint_text="Aliyun AK ID", multiline=False, size_hint_y=None, height='50dp')
-        self.ti_sk = TextInput(hint_text="Aliyun AK Secret", multiline=False, size_hint_y=None, height='50dp',
-                               password=True)
-        root.add_widget(self.ti_ak);
-        root.add_widget(self.ti_sk)
-        btn_save = Button(text="保存配置", size_hint_y=None, height='60dp')
-        btn_save.bind(on_release=self.save_config)
-        root.add_widget(btn_save)
-        root.add_widget(Label(size_hint_y=0.5))
-        btn_back = Button(text="返回", size_hint_y=None, height='60dp', background_color=(0.5, 0.5, 0.5, 1))
-        btn_back.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
-        self.add_widget(root)
-
-    def save_config(self, instance):
-        conf_dir = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(conf_dir, 'config.ini')
-        with open(path, 'w') as f:
-            f.write(f"[aliyun]\naccess_key_id={self.ti_ak.text}\naccess_key_secret={self.ti_sk.text}\n")
-        if self.svc: self.svc.__init__()
-        NativeUtils().show_toast("配置已保存")
+            anim = Animation(opacity_val=1, duration=0.1)
+        anim.start(self)
 
 
 class HomeScreen(Screen):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.native = NativeUtils()
-        self.svc = MedicalService()
-        root = BoxLayout(orientation='vertical', padding='20dp', spacing='30dp')
-        with root.canvas.before:
-            Color(1, 1, 1, 1);
-            Rectangle(size=(2000, 2000))
-        header = BoxLayout(size_hint_y=0.1)
-        header.add_widget(Label(text="智能医疗报告解读", font_size=FONT_L, color=(0, 0, 0, 1), bold=True))
-        btn_set = Button(text="⚙️", size_hint_x=None, width='50dp', background_color=(0, 0, 0, 0), color=(0, 0, 0, 1))
-        btn_set.bind(on_release=lambda x: setattr(self.manager, 'current', 'setting'))
-        header.add_widget(btn_set)
-        root.add_widget(header)
-        self.status = Label(text="初始化...", font_size=FONT_M, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.1)
-        root.add_widget(self.status)
-        btn_box = BoxLayout(orientation='vertical', spacing='20dp', size_hint_y=0.6)
-        btn_cam = Button(text="📷 拍照解读", font_size=FONT_L, background_color=(0.2, 0.6, 1, 1))
-        btn_cam.bind(on_release=self.action_camera)
-        btn_gal = Button(text="🖼️ 相册选择", font_size=FONT_L, background_color=(0.2, 0.8, 0.2, 1))
-        btn_gal.bind(on_release=self.action_gallery)
-        btn_hist = Button(text="🕒 历史记录", font_size=FONT_L, background_color=(0.8, 0.6, 0.2, 1))
-        btn_hist.bind(on_release=lambda x: setattr(self.manager, 'current', 'history'))
-        btn_box.add_widget(btn_cam);
-        btn_box.add_widget(btn_gal);
-        btn_box.add_widget(btn_hist)
-        root.add_widget(btn_box);
-        root.add_widget(Label(size_hint_y=0.2))
-        self.add_widget(root)
-        Clock.schedule_once(self.start, 2)
+    pass
 
-    def start(self, dt):
-        self.native.request_permissions()
-        if self.svc.config_ready:
-            self.status.text = "✅ 云端就绪"
-            self.native.speak("系统就绪")
-        else:
-            self.status.text = "⚠️ 请先设置密钥"
 
-    def action_camera(self, instance):
-        self.native.speak("请拍摄报告")
-        self.native.open_camera(self.process_img)
+class LoadingScreen(Screen):
+    pass
 
-    def action_gallery(self, instance):
-        self.native.speak("请选择图片")
-        self.native.open_gallery(self.process_img)
 
-    def process_img(self, path):
-        if not path or not os.path.exists(path):
-            self.native.show_toast("文件不存在")
-            return
-        self.status.text = "🔄 分析中..."
-        self.native.speak("正在分析，请稍候")
-        threading.Thread(target=self.run_ai, args=(path,)).start()
+class ResultScreen(Screen):
+    def update_view(self, data):
+        self.ids.res_title.text = data.get('title', '无标题')
+        self.ids.res_core.text = data.get('core_conclusion', '无')
+        self.ids.res_abnormal.text = data.get('abnormal_analysis', '无')
+        self.ids.res_advice.text = str(data.get('life_advice', '无'))
 
-    def run_ai(self, path):
-        try:
-            res = self.svc.process(path)
-            Clock.schedule_once(lambda dt: self.done(res), 0)
-        except Exception as e:
-            Clock.schedule_once(lambda dt: self.error(str(e)), 0)
 
-    def done(self, res):
-        if res['code'] == 200:
-            self.status.text = "完成"
-            self.manager.get_screen('result').update(res['data'])
-            self.manager.current = 'result'
-        else:
-            self.error(res['message'])
+class SettingsScreen(Screen):
+    def on_enter(self):
+        # 回显配置
+        app = App.get_running_app()
+        self.ids.input_ali_ak.text = app.config_data.get('ali_ak', '')
+        self.ids.input_ali_sk.text = app.config_data.get('ali_sk', '')
+        self.ids.input_deepseek.text = app.config_data.get('deepseek_key', '')
 
-    def error(self, msg):
-        self.status.text = "❌ 失败"
-        self.native.show_toast(msg)
-        self.native.speak("分析失败")
+    def save(self):
+        app = App.get_running_app()
+        app.save_config(
+            self.ids.input_ali_ak.text,
+            self.ids.input_ali_sk.text,
+            self.ids.input_deepseek.text
+        )
+        app.root.current = 'home'
+
+
+class HistoryScreen(Screen):
+    pass
 
 
 class MedicalApp(App):
     def build(self):
-        Window.clearcolor = (1, 1, 1, 1)
-        db_path = os.path.join(NativeUtils().get_app_dir(), 'medical.db')
-        db = DBManager(db_path)
+        self.native = NativeUtils()
+        self.db_path = os.path.join(self.native.get_cache_dir(), 'history.db')
+        self._init_db()
+        self.load_config()
+
         sm = ScreenManager()
-        home = HomeScreen(name='home')
-        result = ResultScreen(name='result')
-        result.db = db
-        history = HistoryScreen(name='history')
-        history.db = db
-        setting = SettingScreen(name='setting')
-        setting.svc = home.svc
-        sm.add_widget(home);
-        sm.add_widget(result);
-        sm.add_widget(history);
-        sm.add_widget(setting)
+        sm.add_widget(HomeScreen(name='home'))
+        sm.add_widget(LoadingScreen(name='loading'))
+        sm.add_widget(ResultScreen(name='result'))
+        sm.add_widget(SettingsScreen(name='settings'))
+        sm.add_widget(HistoryScreen(name='history'))
+
+        # 请求权限 (仅安卓)
+        self.request_android_permissions()
+
         return sm
+
+    def request_android_permissions(self):
+        from kivy.utils import platform
+        if platform == 'android':
+            from android.permissions import request_permissions, Permission
+            request_permissions([
+                Permission.CAMERA,
+                Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE,
+                Permission.INTERNET
+            ])
+
+    def _init_db(self):
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.execute("CREATE TABLE IF NOT EXISTS history (id INTEGER PRIMARY KEY, json_data TEXT)")
+        self.conn.commit()
+
+    def load_config(self):
+        # 简单使用 ini 存储
+        self.config_file = os.path.join(self.native.get_cache_dir(), 'app_config.ini')
+        self.conf = configparser.ConfigParser()
+        self.conf.read(self.config_file)
+        if not self.conf.has_section('keys'):
+            self.conf.add_section('keys')
+
+        self.config_data = {
+            'ali_ak': self.conf.get('keys', 'ali_ak', fallback=''),
+            'ali_sk': self.conf.get('keys', 'ali_sk', fallback=''),
+            'deepseek_key': self.conf.get('keys', 'deepseek_key', fallback=''),
+            'tongyi_key': ''
+        }
+
+    def save_config(self, ak, sk, ds):
+        self.conf.set('keys', 'ali_ak', ak)
+        self.conf.set('keys', 'ali_sk', sk)
+        self.conf.set('keys', 'deepseek_key', ds)
+        with open(self.config_file, 'w') as f:
+            self.conf.write(f)
+        self.load_config()
+        self.native.toast("配置已保存")
+
+    # --- 业务逻辑 ---
+
+    def on_camera_click(self):
+        self.native.open_camera(self.on_image_selected)
+
+    def pick_image(self):
+        self.native.open_gallery(self.on_image_selected)
+
+    def on_image_selected(self, file_path):
+        if not file_path:
+            return
+        # 切换到加载页
+        self.root.current = 'loading'
+        # 启动线程分析
+        threading.Thread(target=self.run_analysis, args=(file_path,)).start()
+
+    def run_analysis(self, path):
+        # 1. 初始化云服务
+        svc = CloudService(self.config_data)
+
+        # 2. 执行流水线
+        result = svc.run_pipeline(path)
+
+        # 3. 完成后回调 UI
+        self.on_analysis_complete(result)
+
+    @mainthread
+    def on_analysis_complete(self, result):
+        """必须在主线程更新 UI"""
+        # 保存历史
+        try:
+            self.conn.execute("INSERT INTO history (json_data) VALUES (?)", (json.dumps(result),))
+            self.conn.commit()
+        except Exception as e:
+            print(f"DB Save Error: {e}")
+
+        # 更新结果页
+        res_screen = self.root.get_screen('result')
+        res_screen.update_view(result)
+
+        # 跳转
+        self.root.current = 'result'
 
 
 if __name__ == '__main__':
