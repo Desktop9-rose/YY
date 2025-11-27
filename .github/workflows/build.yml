@@ -10,9 +10,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. 拉取代码
       - uses: actions/checkout@v4
 
-      # 生成配置文件供 App 读取密钥
+      # 2. 将 Secrets 注入到配置文件
       - name: Inject Secrets into app_config.ini
         run: |
           echo "[keys]" > app_config.ini
@@ -21,10 +22,10 @@ jobs:
           echo "deepseek_key = ${{ secrets.DEEPSEEK_KEY }}" >> app_config.ini
           echo "tongyi_key = ${{ secrets.TONGYI_KEY }}" >> app_config.ini
           
-          # 验证文件生成（内容会自动打码）
-          cat app_config.ini
+          # 验证文件是否生成
+          echo "Generated app_config.ini"
 
-      # 运行 Buildozer 打包
+      # 3. 运行 Buildozer 打包
       - name: Build with Buildozer
         uses: ArtemSBulgakov/buildozer-action@v1
         id: buildozer
@@ -32,10 +33,12 @@ jobs:
           command: buildozer android debug
           buildozer_version: master
         env:
-          # 关键修复：强制指定用户为 root，解决 "invalid user" 错误
+          # 修复 "invalid user" 错误
           USER: root
+          # 修复 "externally-managed-environment" 错误 (关键修改)
+          PIP_BREAK_SYSTEM_PACKAGES: 1
 
-      # 上传生成的 APK
+      # 4. 上传 APK
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
