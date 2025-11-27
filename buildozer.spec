@@ -20,7 +20,7 @@ version = 0.3
 
 # (list) Application requirements
 # 关键修改：移除了所有 alibabacloud_* 库，只保留 requests
-requirements = python3,kivy==2.3.0,kivymd==1.1.1,requests,pillow,android,jnius,shutil,urllib3,sqlite3
+requirements = python3,kivy==2.3.0,kivymd==1.1.1,requests,pillow,android,pyjnius,urllib3,sqlite3
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
 orientation = portrait
