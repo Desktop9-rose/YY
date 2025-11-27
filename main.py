@@ -3,6 +3,7 @@ import os
 import threading
 import json
 import time
+import shutil
 import sqlite3
 from datetime import datetime
 
@@ -48,6 +49,11 @@ else:
 # --- 数据库模块 ---
 class DBManager:
     def __init__(self, db_path):
+        # 确保目录存在
+        db_dir = os.path.dirname(db_path)
+        if not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self.cursor.execute('''
@@ -77,7 +83,7 @@ class DBManager:
             return []
 
 
-# --- TTS 模块 (修复 Context 问题) ---
+# --- TTS 模块 ---
 class AndroidTTS:
     def __init__(self):
         self.tts = None
@@ -85,9 +91,7 @@ class AndroidTTS:
             try:
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
                 TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
-
-                # 关键修复：使用 Application Context 而不是 Activity Context
-                # 这能避免 Activity 重建导致的 TTS 绑定失败 (code -1)
+                # 使用 ApplicationContext 避免 Activity 重建导致的绑定断裂
                 app_context = PythonActivity.mActivity.getApplicationContext()
                 self.tts = TextToSpeech(app_context, None)
                 print("[TTS] Initialized with AppContext")
@@ -105,7 +109,7 @@ class AndroidTTS:
             print(f"[TTS-MOCK] {text}")
 
 
-# --- 原生功能工具类 (核心修复区) ---
+# --- 原生功能工具类 ---
 class NativeUtils:
     _instance = None
     _callback = None
@@ -124,16 +128,14 @@ class NativeUtils:
         self.tts_engine = AndroidTTS()
         if platform == 'android':
             try:
-                # 1. 绑定回调
                 activity.bind(on_activity_result=self.on_activity_result)
 
-                # 2. 禁用 StrictMode (核弹级修复)
-                # 这允许我们直接通过 file:// 协议调用相机，绕过 MediaStore 插入失败的问题
+                # 禁用 StrictMode (解决相机 file:// 报错)
                 StrictMode = autoclass('android.os.StrictMode')
                 Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
                 new_policy = Builder().build()
                 StrictMode.setVmPolicy(new_policy)
-                print("[Native] StrictMode disabled (Camera Fix)")
+                print("[Native] StrictMode disabled")
             except Exception as e:
                 print(f"[Native] Init Warn: {e}")
 
@@ -151,7 +153,6 @@ class NativeUtils:
             print(f"[TOAST] {text}")
 
     def speak(self, text):
-        # 延迟调用以确保 TTS 引擎就绪
         Clock.schedule_once(lambda dt: self.tts_engine.speak(text), 0.2)
 
     def request_permissions(self):
@@ -167,21 +168,31 @@ class NativeUtils:
             except Exception as e:
                 print(f"[Perm] Error: {e}")
 
-    def get_cache_dir(self):
-        """获取外部缓存目录 (相比 FilesDir 更不易被相机拒读)"""
+    # --- 关键修复：补全两个路径方法 ---
+
+    def get_app_dir(self):
+        """获取内部私有目录 (用于数据库)"""
         if platform == 'android':
             try:
                 PA = autoclass('org.kivy.android.PythonActivity')
+                return PA.mActivity.getFilesDir().getAbsolutePath()
+            except:
+                return "."
+        return "."
+
+    def get_cache_dir(self):
+        """获取外部缓存目录 (用于相机/图片)"""
+        if platform == 'android':
+            try:
+                PA = autoclass('org.kivy.android.PythonActivity')
+                # getExternalCacheDir 对第三方相机更友好
                 return PA.mActivity.getExternalCacheDir().getAbsolutePath()
             except:
                 return "."
         return "."
 
     def open_camera(self, callback):
-        """
-        修复版相机：使用 file:// URI + StrictMode Bypass
-        解决 Invalid column null 错误
-        """
+        """调用相机 (File URI 模式)"""
         self._callback = callback
         if platform == 'android':
             try:
@@ -191,27 +202,25 @@ class NativeUtils:
                 Uri = autoclass('android.net.Uri')
                 File = autoclass('java.io.File')
 
-                # 1. 构造目标文件路径
+                # 使用 Cache Dir
                 filename = f"OCR_{int(time.time())}.jpg"
                 self._camera_target_path = os.path.join(self.get_cache_dir(), filename)
 
-                # 2. 创建 Java File 对象
                 photo_file = File(self._camera_target_path)
-                # 关键：直接使用 fromFile 获取 file:// URI (需要禁用 StrictMode)
+                # 禁用 StrictMode 后可直接用 fromFile
                 photo_uri = Uri.fromFile(photo_file)
 
-                # 3. 启动相机
                 intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, photo_uri)
 
                 PythonActivity.mActivity.startActivityForResult(intent, self.REQUEST_CAMERA)
-                print(f"[Camera] Intent started. Target: {self._camera_target_path}")
+                print(f"[Camera] Started. Target: {self._camera_target_path}")
             except Exception as e:
                 self.show_toast(f"相机启动失败: {e}")
                 print(f"[Camera] Error: {e}")
         else:
             self.show_toast("电脑模拟拍照")
-            p = "mock_cam.jpg"
+            p = "mock.jpg"
             with open(p, 'w') as f:
                 f.write("test")
             callback(p)
@@ -235,19 +244,17 @@ class NativeUtils:
             return True
 
         if request_code == self.REQUEST_CAMERA:
-            # 相机返回：直接检查我们预设的文件路径
+            # 相机返回：检查预设文件
             if self._camera_target_path and os.path.exists(self._camera_target_path):
-                print(f"[Camera] File exists: {self._camera_target_path}")
                 self._safe_callback(self._camera_target_path)
             else:
-                # 延迟检测，防止文件系统写入延迟
+                # 延迟 1秒 再查一次
                 Clock.schedule_once(lambda dt: self._check_cam_file(), 1.0)
 
         elif request_code == self.REQUEST_GALLERY:
-            # 相册返回：处理 Content URI
+            # 相册返回：Content URI -> File
             if intent:
                 uri = intent.getData()
-                # 在后台线程处理文件复制，避免阻塞 UI
                 threading.Thread(target=self._process_gallery_uri, args=(uri,)).start()
 
         return True
@@ -259,8 +266,7 @@ class NativeUtils:
             self.show_toast("未检测到照片")
 
     def _process_gallery_uri(self, uri):
-        """处理相册 URI"""
-        safe_path = self._copy_uri_to_file_java(uri)
+        safe_path = self._uri_to_path_fd(uri)
         if safe_path:
             self._safe_callback(safe_path)
         else:
@@ -270,78 +276,35 @@ class NativeUtils:
         if self._callback:
             Clock.schedule_once(lambda dt: self._callback(path), 0)
 
-    def _copy_uri_to_file_java(self, uri):
+    def _uri_to_path_fd(self, uri):
         """
-        【核心修复】使用纯 Java IO 流复制文件
-        解决 Python open() 遇到的 Permission denied
+        通过文件描述符 (FD) 读取 Content URI
+        解决 Permission denied
         """
         try:
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             context = PythonActivity.mActivity
-
-            # 1. 准备输入流
             resolver = context.getContentResolver()
-            input_stream = resolver.openInputStream(uri)
-            if not input_stream: return None
 
-            # 2. 准备输出文件
-            dest_path = os.path.join(self.get_cache_dir(), f"gallery_{int(time.time())}.jpg")
-            File = autoclass('java.io.File')
-            dest_file = File(dest_path)
-            FileOutputStream = autoclass('java.io.FileOutputStream')
-            output_stream = FileOutputStream(dest_file)
+            pfd = resolver.openFileDescriptor(uri, "r")
+            if not pfd: return None
 
-            # 3. 缓冲区复制 (Java byte[])
-            # 由于 Jnius 传递 byte[] 复杂，我们使用一种变通方法：
-            # 使用 Apache Commons IO 或类似逻辑的简化版？不，依赖太多。
-            # 我们这里使用一次性读取（针对图片通常几MB，还可以接受）
-            # 或者简单的逐字节读取太慢。
+            fd = pfd.getFd()
 
-            # 为了稳定性，我们尝试使用 Android FileUtils (API 29+)
-            # 但为了兼容性，我们尝试最简单的方案：
-            # Python 读取 /proc/self/fd/ 失败是因为 SELinux。
-            # 但我们可以利用 context.getCacheDir() 是 app 私有的特性。
+            dest_filename = f"gallery_{int(time.time())}.jpg"
+            dest_path = os.path.join(self.get_cache_dir(), dest_filename)
 
-            # 让我们尝试用 Kivy 的 Context 辅助？无。
+            # 使用 os.fdopen 包装 FD
+            with os.fdopen(fd, 'rb', closefd=False) as src_file:
+                with open(dest_path, 'wb') as dest_file:
+                    shutil.copyfileobj(src_file, dest_file)
 
-            # 重新尝试：byte 数组传输
-            # 定义一个 8KB 的 buffer
-            # 这种方法在 Python 中写很难。
-
-            # 替代方案：让 Service 直接处理 URI？
-            # 阿里云 SDK 也不支持 content://。
-
-            # 最终方案：
-            # 我们使用 read_bytes() 读取全部内容（Jnius 适配版）
-            # 虽然耗内存，但是能跑通。
-
-            # 构造一个 ByteArrayOutputStream 来接收数据
-            ByteArrayOutputStream = autoclass('java.io.ByteArrayOutputStream')
-            byte_stream = ByteArrayOutputStream()
-
-            # 简单的 int read() 循环在 Python 中太慢。
-            # 让我们赌一把：使用 Python 的 open() 读取 /proc/self/fd/
-            # 之前的报错说明是权限问题。
-
-            # 那么，我们使用 Python 的 shutil.copyfileobj ?
-            # 需要把 Java InputStream 包装成 Python file-object。
-
-            # 实在不行，我们使用最简单的：
-            # 调用 MediaStore.Images.Media.getBitmap?
-            MediaStore = autoclass('android.provider.MediaStore$Images$Media')
-            bitmap = MediaStore.getBitmap(resolver, uri)
-
-            # 将 Bitmap 压缩保存到文件
-            CompressFormat = autoclass('android.graphics.Bitmap$CompressFormat')
-            bitmap.compress(CompressFormat.JPEG, 90, output_stream)
-
-            output_stream.close()
-            input_stream.close()
-            print(f"[File] Bitmap saved to: {dest_path}")
+            pfd.close()
+            print(f"[File] Copied via FD to: {dest_path}")
             return dest_path
 
         except Exception as e:
-            print(f"[File] Copy Java Error: {e}")
+            print(f"[File] FD Copy Error: {e}")
             return None
 
 
@@ -571,8 +534,11 @@ class HomeScreen(Screen):
 class MedicalApp(App):
     def build(self):
         Window.clearcolor = (1, 1, 1, 1)
+
+        # 关键修复：调用 get_app_dir 获取内部存储路径
         db_path = os.path.join(NativeUtils().get_app_dir(), 'medical.db')
         db = DBManager(db_path)
+
         sm = ScreenManager()
         home = HomeScreen(name='home')
         result = ResultScreen(name='result')
