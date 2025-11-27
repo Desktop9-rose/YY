@@ -14,7 +14,7 @@ from datetime import datetime
 from kivy.utils import platform
 from kivy.clock import Clock
 
-# 如果不是安卓，提供一些假的接口防止报错
+# 安卓环境预设
 if platform == 'android':
     from jnius import autoclass, cast
     from android import activity
@@ -27,34 +27,41 @@ else:
     activity = None
 
 
-class NativeUtils:
+class AndroidHelper:
+    """处理相机、相册、Toast、TTS等安卓原生功能"""
     _instance = None
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super(NativeUtils, cls).__new__(cls)
+            cls._instance = super(AndroidHelper, cls).__new__(cls)
             cls._instance._init()
         return cls._instance
 
     def _init(self):
         self.callback = None
         self.temp_image_path = None
+        self.tts = None
 
         if platform == 'android':
             try:
-                # 1. 绑定 Activity 结果监听
+                # 监听 Activity 结果
                 activity.bind(on_activity_result=self.on_activity_result)
 
-                # 2. 绕过 Android 7.0+ 的 FileURI 限制 (最暴力的修复方案)
+                # 初始化 TTS
+                TTS = autoclass('android.speech.tts.TextToSpeech')
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                context = PythonActivity.mActivity.getApplicationContext()
+                self.tts = TTS(context, None)
+
+                # 绕过 Android 7.0+ 文件权限限制 (FileUriExposedException)
                 StrictMode = autoclass('android.os.StrictMode')
                 Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
                 policy = Builder().build()
                 StrictMode.setVmPolicy(policy)
             except Exception as e:
-                print(f"Native Init Error: {e}")
+                print(f"Android Init Error: {e}")
 
     def get_cache_dir(self):
-        """获取安卓缓存目录"""
         if platform == 'android':
             try:
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -64,7 +71,6 @@ class NativeUtils:
         return "."
 
     def toast(self, text):
-        """显示原生 Toast"""
         if platform == 'android':
             try:
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -76,8 +82,16 @@ class NativeUtils:
         else:
             print(f"[TOAST] {text}")
 
+    def speak(self, text):
+        if self.tts:
+            try:
+                self.tts.speak(str(text), 0, None)
+            except:
+                pass
+        else:
+            print(f"[TTS] {text}")
+
     def open_camera(self, callback):
-        """调用相机"""
         self.callback = callback
         if platform == 'android':
             try:
@@ -87,195 +101,161 @@ class NativeUtils:
                 Uri = autoclass('android.net.Uri')
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
 
-                # 设置拍照存储路径
                 filename = f"cam_{int(time.time())}.jpg"
                 self.temp_image_path = os.path.join(self.get_cache_dir(), filename)
                 photo_file = File(self.temp_image_path)
-
-                # 这里的 Uri.fromFile 在绕过 StrictMode 后可用
+                # 禁用 StrictMode 后可直接使用 fromFile
                 image_uri = Uri.fromFile(photo_file)
 
                 intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                # 关键修复：显式转换为 Parcelable，否则会报错 Invalid instance
+                # 关键修复：强制转换为 Parcelable 接口，修复报错
                 parcelable_uri = cast('android.os.Parcelable', image_uri)
                 intent.putExtra(MediaStore.EXTRA_OUTPUT, parcelable_uri)
 
                 PythonActivity.mActivity.startActivityForResult(intent, 0x101)
             except Exception as e:
-                self.toast(f"相机启动失败: {str(e)}")
-                print(f"Camera Error: {e}")
+                self.toast(f"相机启动失败: {e}")
         else:
             self.toast("电脑端模拟拍照")
-            # 模拟回调
             Clock.schedule_once(lambda dt: callback("mock.jpg"), 1)
 
     def open_gallery(self, callback):
-        """调用相册"""
         self.callback = callback
         if platform == 'android':
             try:
                 Intent = autoclass('android.content.Intent')
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
-
                 intent = Intent(Intent.ACTION_PICK)
                 intent.setType("image/*")
                 PythonActivity.mActivity.startActivityForResult(intent, 0x102)
             except Exception as e:
                 self.toast(f"相册启动失败: {e}")
-        else:
-            self.toast("电脑端模拟相册")
 
     def on_activity_result(self, request_code, result_code, intent):
-        """处理回调结果"""
-        if result_code != -1:  # RESULT_OK = -1
-            return True
+        if result_code != -1: return True  # -1 is RESULT_OK
 
         if request_code == 0x101:  # 相机
             if self.temp_image_path and os.path.exists(self.temp_image_path):
-                if self.callback:
-                    self.callback(self.temp_image_path)
+                if self.callback: self.callback(self.temp_image_path)
             else:
-                self.toast("拍照未保存")
+                self.toast("未检测到照片")
 
         elif request_code == 0x102:  # 相册
             if intent:
                 uri = intent.getData()
-                # 启动线程去复制文件，防止阻塞 UI
+                # 启动线程复制文件，避免阻塞 UI 导致白屏
                 threading.Thread(target=self._copy_uri_content, args=(uri,)).start()
-
         return True
 
     def _copy_uri_content(self, uri):
-        """将相册的 content:// 复制为真实文件"""
         try:
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
-            context = PythonActivity.mActivity
-            content_resolver = context.getContentResolver()
+            content_resolver = PythonActivity.mActivity.getContentResolver()
 
-            # 打开输入流
-            input_stream = content_resolver.openInputStream(uri)
+            pfd = content_resolver.openFileDescriptor(uri, "r")
+            if not pfd: return
+            fd = pfd.getFd()
 
-            # 准备输出文件
             filename = f"gallery_{int(time.time())}.jpg"
             dest_path = os.path.join(self.get_cache_dir(), filename)
-
-            # 读取并写入 (Python 读取 Java InputStream 比较麻烦，这里用 byte array)
-            # 更简单的方法：使用 FileDescriptor
-            pfd = content_resolver.openFileDescriptor(uri, "r")
-            fd = pfd.getFd()
 
             with os.fdopen(fd, 'rb', closefd=False) as src:
                 with open(dest_path, 'wb') as dst:
                     shutil.copyfileobj(src, dst)
-
             pfd.close()
-            # input_stream.close() # fdopen handles it
 
             if self.callback:
-                # 回调必须在 UI 线程或者由 Kivy Clock 调度
+                # 回调必须通过 Clock 调度回主线程，或者由接收方处理
                 Clock.schedule_once(lambda dt: self.callback(dest_path), 0)
-
         except Exception as e:
-            print(f"Gallery Copy Error: {e}")
-            Clock.schedule_once(lambda dt: self.toast("无法读取图片"), 0)
+            print(f"Copy Error: {e}")
+            self.toast("图片读取失败")
 
 
-class CloudService:
-    def __init__(self, config):
-        self.ak = config.get('ali_ak', '')
-        self.sk = config.get('ali_sk', '')
-        self.ds_key = config.get('deepseek_key', '')
-        self.ty_key = config.get('tongyi_key', '')
+class APIService:
+    def __init__(self):
+        # 优先读取环境变量 (GitHub Secrets)，其次读取配置文件
+        self.ak = os.environ.get('ALIYUN_AK_ID', '')
+        self.sk = os.environ.get('ALIYUN_AK_SECRET', '')
+        self.ds_key = os.environ.get('DEEPSEEK_KEY', '')
+        self.ty_key = os.environ.get('TONGYI_KEY', '')
 
-    def run_pipeline(self, image_path):
+        # 如果环境变量为空，尝试读取本地 config.ini (用于本地调试或手动设置)
+        # 这里逻辑在 main.py 中处理加载 config.ini 到内存，然后更新这个 Service
+
+    def update_keys(self, ak, sk, ds, ty):
+        if ak: self.ak = ak
+        if sk: self.sk = sk
+        if ds: self.ds_key = ds
+        if ty: self.ty_key = ty
+
+    def analyze_image(self, image_path):
         """
-        1. 阿里云 OCR
-        2. DeepSeek 分析
+        双模态流水线：
+        1. 尝试通义千问 VL (视觉理解)，因其无需独立 OCR，容错率高。
+        2. 如果失败，fallback 逻辑可扩展。
+        3. 调用 DeepSeek 进行专业医学润色 (如果需要)。
         """
-        # 1. OCR
-        ocr_text = self._aliyun_ocr(image_path)
+        if not self.ty_key and not self.ak:
+            return {"title": "配置缺失", "core_conclusion": "请检查 API 密钥设置 (GitHub Secrets 或 手动输入)"}
+
+        # 步骤 1: 视觉识别 (Tongyi VL) - 你的日志显示这个之前是通的
+        ocr_text = self._tongyi_vl_ocr(image_path)
         if not ocr_text:
-            return {"title": "识别失败", "core_conclusion": "OCR 无法提取文字，请检查网络或密钥。"}
+            return {"title": "识别失败", "core_conclusion": "无法从图片中提取文字，请确保图片清晰。"}
 
-        # 2. AI
-        return self._analyze_text(ocr_text)
+        # 步骤 2: 医学分析 (DeepSeek)
+        return self._deepseek_analyze(ocr_text)
 
-    def _aliyun_ocr(self, image_path):
-        """阿里云全文识别高精版 (手写签名，无SDK依赖)"""
+    def _tongyi_vl_ocr(self, image_path):
+        if not self.ty_key: return None
         try:
             with open(image_path, 'rb') as f:
                 img_b64 = base64.b64encode(f.read()).decode('utf-8')
 
-            # 构造参数
-            timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-            nonce = str(uuid.uuid4())
-            params = {
-                "Action": "RecognizeAdvanced",
-                "Version": "2021-07-07",
-                "Format": "JSON",
-                "AccessKeyId": self.ak,
-                "SignatureMethod": "HMAC-SHA1",
-                "SignatureVersion": "1.0",
-                "SignatureNonce": nonce,
-                "Timestamp": timestamp,
-                "NeedRotate": "true",
-                "NeedSortPage": "true",
-                "OutputCharInfo": "false"
+            url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+            headers = {"Authorization": f"Bearer {self.ty_key}", "Content-Type": "application/json"}
+            data = {
+                "model": "qwen-vl-max",
+                "input": {
+                    "messages": [
+                        {"role": "user", "content": [
+                            {"image": f"data:image/jpeg;base64,{img_b64}"},
+                            {"text": "请完整的提取这张化验单上的所有文字信息，包含指标名称、数值、单位和箭头符号。"}
+                        ]}
+                    ]
+                }
+            }
+            resp = requests.post(url, json=data, headers=headers, timeout=35)
+            if resp.status_code == 200:
+                res = resp.json()
+                if 'output' in res and 'choices' in res['output']:
+                    return res['output']['choices'][0]['message']['content'][0]['text']
+            print(f"VL Error: {resp.text}")
+        except Exception as e:
+            print(f"VL Exception: {e}")
+        return None
+
+    def _deepseek_analyze(self, text):
+        if not self.ds_key:
+            # 如果没有 DeepSeek Key，直接返回 OCR 结果的简单包装
+            return {
+                "title": "识别结果 (无AI分析)",
+                "core_conclusion": "未配置 DeepSeek Key，仅显示识别内容。",
+                "abnormal_analysis": text[:200] + "...",
+                "life_advice": "请配置 DeepSeek Key 以获取专业解读。"
             }
 
-            # 签名逻辑
-            sorted_keys = sorted(params.keys())
-            query_str = "&".join([f"{self._percent_encode(k)}={self._percent_encode(params[k])}" for k in sorted_keys])
-            string_to_sign = "POST&%2F&" + self._percent_encode(query_str)
-
-            key = self.sk + "&"
-            signature = base64.b64encode(
-                hmac.new(key.encode('utf-8'), string_to_sign.encode('utf-8'), hashlib.sha1).digest()).decode('utf-8')
-
-            # 最终请求
-            url = "https://ocr-api.cn-hangzhou.aliyuncs.com"
-            # Body 必须包含 image 或 url，这里使用 JSON 提交
-            # 注意：RecognizeAdvanced API 的签名通常只针对 Query 参数，Body 传输内容不参与签名计算
-            # 但为了稳妥，这里使用 Form-Data 提交图片，配合 Query 里的签名
-
-            params["Signature"] = signature
-
-            # 使用 requests 的 files 参数自动处理 multipart/form-data
-            # 重新打开文件流
-            with open(image_path, 'rb') as f:
-                files = {'body': f}
-                resp = requests.post(url, params=params, files=files, timeout=15)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                if 'Data' in data:
-                    content_obj = json.loads(data['Data'])
-                    return content_obj.get('content', '')
-
-            print(f"OCR Error: {resp.text}")
-            return None
-
-        except Exception as e:
-            print(f"OCR Exception: {e}")
-            return None
-
-    def _percent_encode(self, s):
-        res = urllib.parse.quote(str(s), safe='')
-        return res.replace('+', '%20').replace('*', '%2A').replace('%7E', '~')
-
-    def _analyze_text(self, text):
-        """DeepSeek 文本分析"""
         prompt = f"""
-        你是一位专业医生。请分析以下化验单/检查报告的OCR识别文本。
-        忽略乱码。
+        你是一位专业医生。请根据以下化验单文本生成 JSON 报告。
         文本：{text[:3000]}
 
-        请严格按以下 JSON 格式返回，不要包含 ```json 等标记：
+        请返回纯 JSON 格式，不要包含 Markdown 代码块标记 (如 ```json)。格式如下：
         {{
-            "title": "报告标题",
+            "title": "报告类型 (如: 血常规)",
             "core_conclusion": "一句话核心结论",
-            "abnormal_analysis": "异常指标的详细分析",
-            "life_advice": "3条具体生活建议"
+            "abnormal_analysis": "异常指标分析 (列出具体的异常项及其含义)",
+            "life_advice": "3条生活建议"
         }}
         """
         try:
@@ -284,23 +264,19 @@ class CloudService:
             data = {
                 "model": "deepseek-chat",
                 "messages": [{"role": "user", "content": prompt}],
-                "response_format": {"type": "json_object"}  # 强制 JSON
+                "response_format": {"type": "json_object"}
             }
-
             resp = requests.post(url, json=data, headers=headers, timeout=30)
-            res_json = resp.json()
+            content = resp.json()['choices'][0]['message']['content']
 
-            content = res_json['choices'][0]['message']['content']
-
-            # 清洗 markdown 标记，防止 DeepSeek 有时候不听话
+            # 关键修复：清洗 Markdown 标记，防止 JSON 解析炸裂
             content = content.replace("```json", "").replace("```", "").strip()
-
             return json.loads(content)
         except Exception as e:
-            print(f"AI Exception: {e}")
+            print(f"DeepSeek Error: {e}")
             return {
-                "title": "解析错误",
-                "core_conclusion": "AI 响应解析失败",
-                "abnormal_analysis": str(e),
-                "life_advice": "请重试"
+                "title": "分析失败",
+                "core_conclusion": "AI 响应解析错误",
+                "abnormal_analysis": "请重试或检查网络。",
+                "life_advice": ""
             }
