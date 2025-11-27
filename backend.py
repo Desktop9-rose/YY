@@ -216,21 +216,22 @@ class BackendService:
         ak = keys.get('ali_ak')
         sk = keys.get('ali_sk')
 
-        # 方案 A: 通义千问 VL (视觉直出)
+        if not ty_key and not ak:
+            return {"title": "配置错误", "core_conclusion": "未检测到API密钥",
+                    "abnormal_analysis": "请在设置中输入通义千问Key或阿里云Key"}
+
+        # 方案 A: 通义千问 VL
         if ty_key:
-            print("Trying Tongyi VL...")
             res = self._call_tongyi_vl(image_path, ty_key)
             if res: return self._format_ai_result(res, ds_key)
 
-        # 方案 B: 阿里云OCR + DeepSeek
+        # 方案 B: 阿里云OCR
         if ak and sk and ds_key:
-            print("Trying OCR + DeepSeek...")
             ocr_text = self._call_aliyun_ocr(image_path, ak, sk)
             if ocr_text:
                 return self._format_ai_result(ocr_text, ds_key)
 
-        return {"title": "配置错误", "core_conclusion": "未配置有效密钥，请在设置中检查",
-                "abnormal_analysis": "需要通义千问 Key 或 阿里云OCR+DeepSeek Key"}
+        return {"title": "分析失败", "core_conclusion": "无法识别图片内容", "life_advice": "请尝试重拍，保证文字清晰"}
 
     def _call_tongyi_vl(self, path, key):
         try:
@@ -247,14 +248,12 @@ class BackendService:
             resp = requests.post(url, json=data, headers={"Authorization": f"Bearer {key}"}, timeout=35)
             if resp.status_code == 200:
                 return resp.json()['output']['choices'][0]['message']['content'][0]['text']
-            else:
-                print(f"VL Error: {resp.text}")
-        except Exception as e:
-            print(f"VL Exception: {e}")
+        except:
+            pass
         return None
 
     def _call_aliyun_ocr(self, path, ak, sk):
-        # 简单的占位，因为现在主要推荐 VL
+        # 简化版，推荐使用 VL
         return None
 
     def _format_ai_result(self, text, ds_key):
@@ -262,7 +261,7 @@ class BackendService:
             return {"title": "识别结果", "core_conclusion": text[:100], "abnormal_analysis": text}
 
         prompt = f"""
-        你是一位医生。根据以下报告内容生成JSON。
+        你是一位医生。根据内容生成JSON。
         内容：{text[:3000]}
         格式：{{"title":"标题","core_conclusion":"结论","abnormal_analysis":"异常","life_advice":"建议"}}
         纯JSON，无Markdown。

@@ -9,10 +9,12 @@ from kivy.clock import Clock, mainthread
 from kivy.core.window import Window
 from kivy.metrics import dp
 from kivy.core.text import LabelBase
-from kivy.uix.screenmanager import ScreenManager  # 关键修复：补全此导入
+from kivy.uix.screenmanager import ScreenManager
+from kivy.properties import StringProperty, ColorProperty, ListProperty
 
 from kivymd.app import MDApp
 from kivymd.uix.screen import MDScreen
+from kivymd.uix.card import MDCard
 from kivymd.uix.dialog import MDDialog
 from kivymd.toast import toast
 
@@ -24,10 +26,18 @@ font_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'msyh.ttf')
 if os.path.exists(font_path):
     LabelBase.register(name='Roboto', fn_regular=font_path)
 
+
+# 关键修复：在 Python 端显式定义组件属性，防止 AttributeError
+class HomeCard(MDCard):
+    text = StringProperty("")
+    icon = StringProperty("android")
+    icon_color = ColorProperty([0, 0, 0, 1])
+
+
 KV = '''
 #:import hex kivy.utils.get_color_from_hex
 
-<HomeCard@MDCard>:
+<HomeCard>:
     orientation: "horizontal"
     size_hint: 0.9, None
     height: "100dp"
@@ -269,6 +279,7 @@ class MedicalApp(MDApp):
         self.config_file = os.path.join(writable_dir, 'app_config.ini')
         bundled_config = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'app_config.ini')
 
+        # 优先从打包资源复制默认配置
         if not os.path.exists(self.config_file) and os.path.exists(bundled_config):
             try:
                 shutil.copy(bundled_config, self.config_file)
