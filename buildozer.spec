@@ -19,7 +19,6 @@ source.include_exts = py,png,jpg,kv,atlas,ttf,ini
 version = 0.3
 
 # (list) Application requirements
-# 修复：删除了 shutil，jnius 改为 pyjnius
 requirements = python3,kivy==2.3.0,kivymd==1.1.1,requests,pillow,android,pyjnius,urllib3,sqlite3
 
 # (str) Supported orientation (one of landscape, sensorLandscape, portrait or all)
@@ -43,11 +42,20 @@ android.sdk = 33
 # (str) Android NDK version to use
 android.ndk = 25b
 
+# (str) Android Build Tools version to use
+android.build_tools_version = 34.0.0
+
 # (bool) Use --private data storage
 android.private_storage = True
 
 # (str) Android arch
 android.archs = arm64-v8a
+
+# (bool) Skip byte compile for .py files
+android.no_byte_compile_python = 0
+
+# (bool) Accept SDK license automatically
+android.accept_sdk_license = True
 
 [buildozer]
 
@@ -55,5 +63,4 @@ android.archs = arm64-v8a
 log_level = 2
 
 # (int) Display warning if buildozer is run as root (0 = False, 1 = True)
-# 修复：设为 0 以允许在 CI 容器中使用 root 权限构建
 warn_on_root = 0
