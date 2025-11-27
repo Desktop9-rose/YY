@@ -2,89 +2,43 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
-  build-android:
-    # 使用 Ubuntu 22.04 (Jammy)
-    runs-on: ubuntu-22.04
+  build:
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      # 1. 拉取代码
+      - uses: actions/checkout@v4
 
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: false
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v3
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      # 关键修复：
-      # 1. 移除了 gstreamer 相关库 (解决依赖冲突)
-      # 2. 添加了 libffi-dev (Python 编译必需)
-      # 3. 保留了 libtool-bin (解决 configure 报错)
-      - name: Install System Dependencies
+      # 2. 【关键新增】将 Secrets 注入到配置文件
+      # 这一步生成的 app_config.ini 会被打包进 APK
+      - name: Inject Secrets into app_config.ini
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git ffmpeg libsdl2-dev libsdl2-image-dev \
-            libsdl2-mixer-dev libsdl2-ttf-dev libportmidi-dev \
-            libswscale-dev libavformat-dev libavcodec-dev zlib1g-dev \
-            libssl-dev libsqlite3-dev libffi-dev openjdk-17-jdk \
-            autoconf libtool libtool-bin pkg-config zip unzip cmake automake
-
-      - name: Install Buildozer
-        run: |
-          pip install --upgrade pip
-          pip install buildozer cython==0.29.36
-
-      # 现场生成 config.ini，注入密钥
-      - name: Create Config File from Secrets
-        env:
-          AK_ID: ${{ secrets.ALIYUN_AK_ID }}
-          AK_SECRET: ${{ secrets.ALIYUN_AK_SECRET }}
-          DS_KEY: ${{ secrets.DEEPSEEK_KEY }}
-          TY_KEY: ${{ secrets.TONGYI_KEY }}
-        run: |
-          echo "[aliyun]" > config.ini
-          echo "access_key_id = $AK_ID" >> config.ini
-          echo "access_key_secret = $AK_SECRET" >> config.ini
-          echo "endpoint = ocr-api.cn-hangzhou.aliyuncs.com" >> config.ini
-          echo "" >> config.ini
-          echo "[llm]" >> config.ini
-          echo "deepseek_key = $DS_KEY" >> config.ini
-          echo "tongyi_key = $TY_KEY" >> config.ini
-          echo "cleaning_model_provider = tongyi" >> config.ini
+          echo "[keys]" > app_config.ini
+          echo "ali_ak = ${{ secrets.ALIYUN_AK_ID }}" >> app_config.ini
+          echo "ali_sk = ${{ secrets.ALIYUN_AK_SECRET }}" >> app_config.ini
+          echo "deepseek_key = ${{ secrets.DEEPSEEK_KEY }}" >> app_config.ini
+          echo "tongyi_key = ${{ secrets.TONGYI_KEY }}" >> app_config.ini
           
-          # 验证文件是否生成 (脱敏打印)
-          echo "Config file generated successfully."
+          # 验证文件是否生成（GitHub 会自动打码敏感信息）
+          echo "Generated app_config.ini content:"
+          cat app_config.ini
 
+      # 3. 运行 Buildozer 打包
+      # 确保 buildozer.spec 中的 source.include_exts 包含了 ini (默认通常包含)
       - name: Build with Buildozer
+        uses: ArtemSBulgakov/buildozer-action@v1
         id: buildozer
-        run: |
-          yes | buildozer android debug
-        continue-on-error: false
+        with:
+          command: buildozer android debug
+          buildozer_version: master
 
-      - name: Upload APK Artifact
+      # 4. 上传 APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: medical-app-v0.1
+          name: package
           path: bin/*.apk
-          retention-days: 3
