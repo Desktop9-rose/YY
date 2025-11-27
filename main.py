@@ -19,21 +19,20 @@ from kivy.core.window import Window
 from kivy.clock import Clock
 from kivy.utils import platform
 from kivy.graphics import Color, Rectangle
+from kivy.core.text import LabelBase
 
 # 业务逻辑
 from service import MedicalService
 
-# 字体注册
-from kivy.core.text import LabelBase
+# --- 关键修复：绝对路径加载字体 ---
+app_folder = os.path.dirname(os.path.abspath(__file__))
+font_path = os.path.join(app_folder, 'msyh.ttf')
+LabelBase.register(name='Roboto', fn_regular=font_path)
 
-LabelBase.register(name='Roboto', fn_regular='msyh.ttf')
-
-# 字体配置
 FONT_L = '32sp'
 FONT_M = '28sp'
 FONT_S = '24sp'
 
-# 安卓环境检测与导入
 if platform == 'android':
     from jnius import autoclass, cast, PythonJavaClass, java_method
     from android import activity
@@ -46,22 +45,18 @@ else:
     activity = None
 
 
-# --- 数据库模块 ---
+# --- 数据库模块 (保持不变) ---
 class DBManager:
     def __init__(self, db_path):
-        # 确保目录存在
         db_dir = os.path.dirname(db_path)
         if not os.path.exists(db_dir):
             os.makedirs(db_dir)
-
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self.cursor.execute('''
             CREATE TABLE IF NOT EXISTS history (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                date TEXT,
-                summary TEXT,
-                details TEXT
+                date TEXT, summary TEXT, details TEXT
             )
         ''')
         self.conn.commit()
@@ -91,25 +86,23 @@ class AndroidTTS:
             try:
                 PythonActivity = autoclass('org.kivy.android.PythonActivity')
                 TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
-                # 使用 ApplicationContext 避免 Activity 重建导致的绑定断裂
                 app_context = PythonActivity.mActivity.getApplicationContext()
                 self.tts = TextToSpeech(app_context, None)
-                print("[TTS] Initialized with AppContext")
             except Exception as e:
                 print(f"[TTS] Init Error: {e}")
 
     def speak(self, text):
         if self.tts:
             try:
-                # 0 = QUEUE_FLUSH
+                # 限制文本长度防止缓冲区溢出
+                if len(text) > 200:
+                    text = text[:200] + "..."
                 self.tts.speak(str(text), 0, None)
             except Exception as e:
                 print(f"[TTS] Speak Error: {e}")
-        else:
-            print(f"[TTS-MOCK] {text}")
 
 
-# --- 原生功能工具类 ---
+# --- Native 工具类 ---
 class NativeUtils:
     _instance = None
     _callback = None
@@ -129,13 +122,9 @@ class NativeUtils:
         if platform == 'android':
             try:
                 activity.bind(on_activity_result=self.on_activity_result)
-
-                # 禁用 StrictMode (解决相机 file:// 报错)
                 StrictMode = autoclass('android.os.StrictMode')
                 Builder = autoclass('android.os.StrictMode$VmPolicy$Builder')
-                new_policy = Builder().build()
-                StrictMode.setVmPolicy(new_policy)
-                print("[Native] StrictMode disabled")
+                StrictMode.setVmPolicy(Builder().build())
             except Exception as e:
                 print(f"[Native] Init Warn: {e}")
 
@@ -149,29 +138,19 @@ class NativeUtils:
                 Toast.makeText(PythonActivity.mActivity, String(str(text)), 0).show()
             except:
                 pass
-        else:
-            print(f"[TOAST] {text}")
 
     def speak(self, text):
         Clock.schedule_once(lambda dt: self.tts_engine.speak(text), 0.2)
 
     def request_permissions(self):
         if platform == 'android':
-            try:
-                from android.permissions import request_permissions, Permission
-                request_permissions([
-                    Permission.CAMERA,
-                    Permission.READ_EXTERNAL_STORAGE,
-                    Permission.WRITE_EXTERNAL_STORAGE,
-                    Permission.RECORD_AUDIO
-                ])
-            except Exception as e:
-                print(f"[Perm] Error: {e}")
-
-    # --- 关键修复：补全两个路径方法 ---
+            from android.permissions import request_permissions, Permission
+            request_permissions([
+                Permission.CAMERA, Permission.READ_EXTERNAL_STORAGE,
+                Permission.WRITE_EXTERNAL_STORAGE, Permission.RECORD_AUDIO
+            ])
 
     def get_app_dir(self):
-        """获取内部私有目录 (用于数据库)"""
         if platform == 'android':
             try:
                 PA = autoclass('org.kivy.android.PythonActivity')
@@ -181,18 +160,15 @@ class NativeUtils:
         return "."
 
     def get_cache_dir(self):
-        """获取外部缓存目录 (用于相机/图片)"""
         if platform == 'android':
             try:
                 PA = autoclass('org.kivy.android.PythonActivity')
-                # getExternalCacheDir 对第三方相机更友好
                 return PA.mActivity.getExternalCacheDir().getAbsolutePath()
             except:
                 return "."
         return "."
 
     def open_camera(self, callback):
-        """调用相机 (File URI 模式)"""
         self._callback = callback
         if platform == 'android':
             try:
@@ -201,29 +177,25 @@ class NativeUtils:
                 MediaStore = autoclass('android.provider.MediaStore')
                 Uri = autoclass('android.net.Uri')
                 File = autoclass('java.io.File')
+                # 关键修复：引入 Parcelable
+                Parcelable = autoclass('android.os.Parcelable')
 
-                # 使用 Cache Dir
                 filename = f"OCR_{int(time.time())}.jpg"
                 self._camera_target_path = os.path.join(self.get_cache_dir(), filename)
-
                 photo_file = File(self._camera_target_path)
-                # 禁用 StrictMode 后可直接用 fromFile
                 photo_uri = Uri.fromFile(photo_file)
 
                 intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-                intent.putExtra(MediaStore.EXTRA_OUTPUT, photo_uri)
+                # 关键修复：显式转换类型
+                intent.putExtra(MediaStore.EXTRA_OUTPUT, cast('android.os.Parcelable', photo_uri))
 
                 PythonActivity.mActivity.startActivityForResult(intent, self.REQUEST_CAMERA)
-                print(f"[Camera] Started. Target: {self._camera_target_path}")
             except Exception as e:
                 self.show_toast(f"相机启动失败: {e}")
                 print(f"[Camera] Error: {e}")
         else:
             self.show_toast("电脑模拟拍照")
-            p = "mock.jpg"
-            with open(p, 'w') as f:
-                f.write("test")
-            callback(p)
+            callback("mock.jpg")
 
     def open_gallery(self, callback):
         self._callback = callback
@@ -236,34 +208,17 @@ class NativeUtils:
                 PythonActivity.mActivity.startActivityForResult(intent, self.REQUEST_GALLERY)
             except Exception as e:
                 self.show_toast(f"相册错误: {e}")
-        else:
-            self.show_toast("电脑不支持")
 
     def on_activity_result(self, request_code, result_code, intent):
-        if result_code != -1:  # RESULT_OK
-            return True
-
+        if result_code != -1: return True
         if request_code == self.REQUEST_CAMERA:
-            # 相机返回：检查预设文件
             if self._camera_target_path and os.path.exists(self._camera_target_path):
                 self._safe_callback(self._camera_target_path)
-            else:
-                # 延迟 1秒 再查一次
-                Clock.schedule_once(lambda dt: self._check_cam_file(), 1.0)
-
         elif request_code == self.REQUEST_GALLERY:
-            # 相册返回：Content URI -> File
             if intent:
                 uri = intent.getData()
                 threading.Thread(target=self._process_gallery_uri, args=(uri,)).start()
-
         return True
-
-    def _check_cam_file(self):
-        if self._camera_target_path and os.path.exists(self._camera_target_path):
-            self._safe_callback(self._camera_target_path)
-        else:
-            self.show_toast("未检测到照片")
 
     def _process_gallery_uri(self, uri):
         safe_path = self._uri_to_path_fd(uri)
@@ -277,38 +232,24 @@ class NativeUtils:
             Clock.schedule_once(lambda dt: self._callback(path), 0)
 
     def _uri_to_path_fd(self, uri):
-        """
-        通过文件描述符 (FD) 读取 Content URI
-        解决 Permission denied
-        """
         try:
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             context = PythonActivity.mActivity
             resolver = context.getContentResolver()
-
             pfd = resolver.openFileDescriptor(uri, "r")
             if not pfd: return None
-
             fd = pfd.getFd()
-
-            dest_filename = f"gallery_{int(time.time())}.jpg"
-            dest_path = os.path.join(self.get_cache_dir(), dest_filename)
-
-            # 使用 os.fdopen 包装 FD
-            with os.fdopen(fd, 'rb', closefd=False) as src_file:
-                with open(dest_path, 'wb') as dest_file:
-                    shutil.copyfileobj(src_file, dest_file)
-
+            dest_path = os.path.join(self.get_cache_dir(), f"gallery_{int(time.time())}.jpg")
+            with os.fdopen(fd, 'rb', closefd=False) as src, open(dest_path, 'wb') as dst:
+                shutil.copyfileobj(src, dst)
             pfd.close()
-            print(f"[File] Copied via FD to: {dest_path}")
             return dest_path
-
         except Exception as e:
-            print(f"[File] FD Copy Error: {e}")
+            print(f"FD Copy Error: {e}")
             return None
 
 
-# --- 界面 ---
+# --- 界面类 (保持原逻辑，只需确保字体加载) ---
 class ResultScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -320,6 +261,7 @@ class ResultScreen(Screen):
             Color(1, 1, 1, 1)
             Rectangle(size=(2000, 2000))
 
+        # 使用 FONT_L 常量
         root.add_widget(Label(text="诊断结果", font_size=FONT_L, color=(0, 0, 0, 1), bold=True, size_hint_y=0.1))
 
         scroll = ScrollView(size_hint_y=0.8)
@@ -331,7 +273,6 @@ class ResultScreen(Screen):
             size_hint_y=None, halign='left', valign='top', text_size=(Window.width - 50, None)
         )
         self.lbl_content.bind(texture_size=self.lbl_content.setter('size'))
-
         self.box.add_widget(self.lbl_content)
         scroll.add_widget(self.box)
         root.add_widget(scroll)
@@ -361,7 +302,6 @@ class ResultScreen(Screen):
         text += f"[color=#006600][b]生活建议：[/b][/color]\n{life}"
 
         self.lbl_content.text = text
-        self.lbl_content.text_size = (Window.width - 50, None)
         self.lbl_content.texture_update()
 
         self.current_text = f"解读完成。{core}"
@@ -376,19 +316,16 @@ class HistoryScreen(Screen):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.db = None
-
         root = BoxLayout(orientation='vertical', padding='10dp')
         with root.canvas.before:
-            Color(0.95, 0.95, 0.95, 1)
+            Color(0.95, 0.95, 0.95, 1);
             Rectangle(size=(2000, 2000))
         root.add_widget(Label(text="历史记录", font_size=FONT_L, color=(0, 0, 0, 1), size_hint_y=0.1))
-
         self.scroll = ScrollView(size_hint_y=0.8)
         self.list_box = BoxLayout(orientation='vertical', spacing='10dp', size_hint_y=None)
         self.list_box.bind(minimum_height=self.list_box.setter('height'))
         self.scroll.add_widget(self.list_box)
         root.add_widget(self.scroll)
-
         btn_back = Button(text="返回", size_hint_y=0.1, background_color=(0.5, 0.5, 0.5, 1))
         btn_back.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
         root.add_widget(btn_back)
@@ -400,17 +337,15 @@ class HistoryScreen(Screen):
     def refresh_list(self):
         self.list_box.clear_widgets()
         if not self.db: return
-        records = self.db.get_all()
-        for rid, date, summary, details in records:
+        for rid, date, summary, details in self.db.get_all():
             item = BoxLayout(orientation='vertical', size_hint_y=None, height='100dp', padding='5dp')
             with item.canvas.before:
-                Color(1, 1, 1, 1)
+                Color(1, 1, 1, 1);
                 Rectangle(pos=item.pos, size=item.size)
-            lbl_date = Label(text=date, font_size=FONT_S, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.3)
-            lbl_sum = Label(text=str(summary)[:20] + "...", font_size=FONT_M, color=(0, 0, 0, 1), size_hint_y=0.7)
-            item.add_widget(lbl_date)
-            item.add_widget(lbl_sum)
-            btn = Button(text="", background_color=(0, 0, 0, 0), size_hint=(1, 1), pos=item.pos)
+            item.add_widget(Label(text=date, font_size=FONT_S, color=(0.5, 0.5, 0.5, 1), size_hint_y=0.3))
+            item.add_widget(
+                Label(text=str(summary)[:20] + "...", font_size=FONT_M, color=(0, 0, 0, 1), size_hint_y=0.7))
+            btn = Button(background_color=(0, 0, 0, 0), size_hint=(1, 1), pos=item.pos)
             btn.bind(on_release=lambda x, d=details: self.show_detail(d))
             item.add_widget(btn)
             self.list_box.add_widget(item)
@@ -430,13 +365,13 @@ class SettingScreen(Screen):
         self.svc = None
         root = BoxLayout(orientation='vertical', padding='20dp', spacing='20dp')
         with root.canvas.before:
-            Color(1, 1, 1, 1)
+            Color(1, 1, 1, 1);
             Rectangle(size=(2000, 2000))
         root.add_widget(Label(text="设置", font_size=FONT_L, color=(0, 0, 0, 1), size_hint_y=0.1))
         self.ti_ak = TextInput(hint_text="Aliyun AK ID", multiline=False, size_hint_y=None, height='50dp')
         self.ti_sk = TextInput(hint_text="Aliyun AK Secret", multiline=False, size_hint_y=None, height='50dp',
                                password=True)
-        root.add_widget(self.ti_ak)
+        root.add_widget(self.ti_ak);
         root.add_widget(self.ti_sk)
         btn_save = Button(text="保存配置", size_hint_y=None, height='60dp')
         btn_save.bind(on_release=self.save_config)
@@ -444,11 +379,12 @@ class SettingScreen(Screen):
         root.add_widget(Label(size_hint_y=0.5))
         btn_back = Button(text="返回", size_hint_y=None, height='60dp', background_color=(0.5, 0.5, 0.5, 1))
         btn_back.bind(on_release=lambda x: setattr(self.manager, 'current', 'home'))
-        root.add_widget(btn_back)
         self.add_widget(root)
 
     def save_config(self, instance):
-        with open('config.ini', 'w') as f:
+        conf_dir = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(conf_dir, 'config.ini')
+        with open(path, 'w') as f:
             f.write(f"[aliyun]\naccess_key_id={self.ti_ak.text}\naccess_key_secret={self.ti_sk.text}\n")
         if self.svc: self.svc.__init__()
         NativeUtils().show_toast("配置已保存")
@@ -461,7 +397,7 @@ class HomeScreen(Screen):
         self.svc = MedicalService()
         root = BoxLayout(orientation='vertical', padding='20dp', spacing='30dp')
         with root.canvas.before:
-            Color(1, 1, 1, 1)
+            Color(1, 1, 1, 1);
             Rectangle(size=(2000, 2000))
         header = BoxLayout(size_hint_y=0.1)
         header.add_widget(Label(text="智能医疗报告解读", font_size=FONT_L, color=(0, 0, 0, 1), bold=True))
@@ -478,10 +414,10 @@ class HomeScreen(Screen):
         btn_gal.bind(on_release=self.action_gallery)
         btn_hist = Button(text="🕒 历史记录", font_size=FONT_L, background_color=(0.8, 0.6, 0.2, 1))
         btn_hist.bind(on_release=lambda x: setattr(self.manager, 'current', 'history'))
-        btn_box.add_widget(btn_cam)
-        btn_box.add_widget(btn_gal)
+        btn_box.add_widget(btn_cam);
+        btn_box.add_widget(btn_gal);
         btn_box.add_widget(btn_hist)
-        root.add_widget(btn_box)
+        root.add_widget(btn_box);
         root.add_widget(Label(size_hint_y=0.2))
         self.add_widget(root)
         Clock.schedule_once(self.start, 2)
@@ -534,11 +470,8 @@ class HomeScreen(Screen):
 class MedicalApp(App):
     def build(self):
         Window.clearcolor = (1, 1, 1, 1)
-
-        # 关键修复：调用 get_app_dir 获取内部存储路径
         db_path = os.path.join(NativeUtils().get_app_dir(), 'medical.db')
         db = DBManager(db_path)
-
         sm = ScreenManager()
         home = HomeScreen(name='home')
         result = ResultScreen(name='result')
@@ -547,9 +480,9 @@ class MedicalApp(App):
         history.db = db
         setting = SettingScreen(name='setting')
         setting.svc = home.svc
-        sm.add_widget(home)
-        sm.add_widget(result)
-        sm.add_widget(history)
+        sm.add_widget(home);
+        sm.add_widget(result);
+        sm.add_widget(history);
         sm.add_widget(setting)
         return sm
 
